@@ -151,7 +151,8 @@ docker exec -it robotwin-lingbot-vla-v2 bash
 
 ### 2.2 Radeon Cloud
 
-云端入口参考 [Radeon Cloud User Guide](https://github.com/AMD-DEV-CONTEST/Radeon-hackathon-2026-07/tree/main/Radeon-Cloud-User%20Guide)。
+当前需要在 [Radeon Cloud Global](https://radeon-global.anruicloud.com/) 上验证。云端
+操作参考 [Radeon Cloud User Guide](https://github.com/AMD-DEV-CONTEST/Radeon-hackathon-2026-07/tree/main/Radeon-Cloud-User%20Guide)。
 Radeon Cloud 使用本项目构建并上传到镜像仓库的 **external-data 镜像**，不是 full
 镜像，也不是仅启动原始 ROCm PyTorch 基础镜像：
 
@@ -161,7 +162,10 @@ robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1-exter
 
 1. 登录 Radeon Cloud，进入 **Profile → My Templates → Add Template**。
 2. **Container Image** 填写上述 external-data 镜像在云端镜像仓库中的完整地址。
-3. 平台后台已经固定挂载整个 `/models`，用户不需要手动挂载。external-data
+   Add Template 最后的 **Model Directory** 选项必须选择并拉取 **Devzone**；如果
+   没有选择 Devzone，实例内不会挂载 external-data 镜像所需的数据。
+3. 选择 **Devzone** 后，平台后台会把相应内容挂载到 `/models`，用户不需要手动
+   挂载。external-data
    所需内容位于其中的 `/models/robotwin-persistent`，目录结构为：
 
    ```text
