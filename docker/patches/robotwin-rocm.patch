@@ -1,0 +1,335 @@
+diff --git a/envs/robot/planner.py b/envs/robot/planner.py
+index 21ae432..fdc8465 100644
+--- a/envs/robot/planner.py
++++ b/envs/robot/planner.py
+@@ -271,10 +271,42 @@ try:
+             return result_p, result_q
+     
+ except Exception as e:
++    _CUROBO_IMPORT_ERROR = e
+     print('[planner.py]: Something wrong happened when importing CuroboPlanner! Please check if Curobo is installed correctly. If the problem still exists, you can install Curobo from https://github.com/NVlabs/curobo manually.')
+     print('Exception traceback:')
+     traceback.print_exc()
+ 
++    class CuroboPlanner:
++        """Allow policy-only rollouts to initialize without Curobo kernels.
++
++        A learned policy drives the joints directly and does not use this
++        planner. Expert generation still fails loudly unless the opt-in
++        environment variable is set.
++        """
++
++        def __init__(self, *args, **kwargs):
++            import os
++
++            if os.environ.get("ROBOTWIN_DISABLE_CUROBO") != "1":
++                raise RuntimeError(
++                    "Curobo is unavailable. Set ROBOTWIN_DISABLE_CUROBO=1 only "
++                    "for policy rollouts with expert_check=false."
++                ) from _CUROBO_IMPORT_ERROR
++
++        def plan_grippers(self, now_val, target_val):
++            values = np.linspace(now_val, target_val, 200)
++            return {
++                "num_step": 200,
++                "per_step": (target_val - now_val) / 200,
++                "result": values,
++            }
++
++        def __getattr__(self, name):
++            raise RuntimeError(
++                f"Curobo planner operation {name!r} is unavailable in a "
++                "policy-only rollout."
++            )
++
+ 
+ # ********************** MplibPlanner **********************
+ class MplibPlanner:
+diff --git a/envs/robot/robot.py b/envs/robot/robot.py
+index 9dfc08f..04fb174 100644
+--- a/envs/robot/robot.py
++++ b/envs/robot/robot.py
+@@ -301,13 +301,23 @@ class Robot:
+             self.right_proc.start()
+ 
+         if self.need_topp:
++            ee_planner = os.environ.get("ROBOTWIN_EE_PLANNER", "")
++            mplib_type = "mplib_screw" if ee_planner == "mplib_screw" else "mplib_RRT"
++            left_mplib_type = (
++                mplib_type if ee_planner.startswith("mplib")
++                else self.left_planner_type
++            )
++            right_mplib_type = (
++                mplib_type if ee_planner.startswith("mplib")
++                else self.right_planner_type
++            )
+             self.left_mplib_planner = MplibPlanner(
+                 self.left_urdf_path,
+                 self.left_srdf_path,
+                 self.left_move_group,
+                 self.left_entity_origion_pose,
+                 self.left_entity,
+-                self.left_planner_type,
++                left_mplib_type,
+                 scene,
+             )
+             self.right_mplib_planner = MplibPlanner(
+@@ -316,7 +326,7 @@ class Robot:
+                 self.right_move_group,
+                 self.right_entity_origion_pose,
+                 self.right_entity,
+-                self.right_planner_type,
++                right_mplib_type,
+                 scene,
+             )
+ 
+@@ -439,6 +449,13 @@ class Robot:
+ 
+         trans_target_pose = self._trans_from_gripper_to_endlink(target_pose, arm_tag="left")
+ 
++        if os.environ.get("ROBOTWIN_EE_PLANNER", "").startswith("mplib"):
++            if not hasattr(self, "left_mplib_planner"):
++                raise RuntimeError("MPLib EE fallback requested but left MPLib planner is unavailable")
++            return self.left_mplib_planner.plan_path(
++                now_qpos, trans_target_pose, arms_tag="left"
++            )
++
+         if self.communication_flag:
+             self.left_conn.send({
+                 "cmd": "plan_path",
+@@ -473,6 +490,13 @@ class Robot:
+ 
+         trans_target_pose = self._trans_from_gripper_to_endlink(target_pose, arm_tag="right")
+ 
++        if os.environ.get("ROBOTWIN_EE_PLANNER", "").startswith("mplib"):
++            if not hasattr(self, "right_mplib_planner"):
++                raise RuntimeError("MPLib EE fallback requested but right MPLib planner is unavailable")
++            return self.right_mplib_planner.plan_path(
++                now_qpos, trans_target_pose, arms_tag="right"
++            )
++
+         if self.communication_flag:
+             self.right_conn.send({
+                 "cmd": "plan_path",
+diff --git a/scripts/eval_policy_xpolicylab.py b/scripts/eval_policy_xpolicylab.py
+index a0e5614..9bb59de 100644
+--- a/scripts/eval_policy_xpolicylab.py
++++ b/scripts/eval_policy_xpolicylab.py
+@@ -9,6 +9,7 @@ import os
+ import queue
+ import subprocess
+ import sys
++import time
+ import traceback
+ from collections.abc import Mapping, Sequence
+ from datetime import datetime
+@@ -85,6 +86,18 @@ def build_policy_client(usr_args: dict[str, Any]):
+     host = usr_args.get("host") or usr_args.get("policy_server_host") or "localhost"
+     port = usr_args.get("port") or usr_args.get("policy_server_port")
+ 
++    if protocol == "lingbot_vla_v2":
++        if port is None:
++            raise ValueError("port must be set for lingbot_vla_v2")
++        source_root = usr_args.get("lingbot_vla_source") or os.environ.get("LINGBOT_VLA_SOURCE")
++        if source_root and source_root not in sys.path:
++            sys.path.insert(0, source_root)
++        from deploy.websocket_client_policy import WebsocketClientPolicy
++
++        client = WebsocketClientPolicy(host=host, port=int(port))
++        client._robotwin_protocol = protocol
++        return client
++
+     if protocol == "ws":
+         from client_server.ws import WsModelClient
+ 
+@@ -174,6 +187,10 @@ def load_task_args(usr_args: dict[str, Any]) -> tuple[dict[str, Any], str]:
+     args["task_config"] = task_config
+     args["ckpt_setting"] = ckpt_setting
+     args["policy_name"] = usr_args["policy_name"]
++    if usr_args.get("instruction_override"):
++        args["instruction_override"] = usr_args["instruction_override"]
++    if "eval_video_log" in usr_args:
++        args["eval_video_log"] = parse_bool(usr_args["eval_video_log"])
+     ensure_xpolicylab_observation_flags(args)
+ 
+     embodiment_type = args.get("embodiment")
+@@ -302,7 +319,7 @@ def main(usr_args: dict[str, Any]) -> None:
+     usr_args["right_arm_dim"] = len(args["right_embodiment_config"]["arm_joints_name"][1])
+ 
+     seed = int(usr_args["seed"])
+-    st_seed = 100000 * (1 + seed)
++    st_seed = int(usr_args.get("seed_start", 100000 * (1 + seed)))
+     test_num = int(usr_args.get("test_num", 100))
+ 
+     model_client = build_policy_client(usr_args)
+@@ -362,7 +379,7 @@ def main_batch(usr_args: dict[str, Any]) -> None:
+         print_config(args, embodiment_name)
+ 
+     seed = int(usr_args["seed"])
+-    st_seed = 100000 * (1 + seed)
++    st_seed = int(usr_args.get("seed_start", 100000 * (1 + seed)))
+     test_num = int(usr_args.get("test_num") or 100)
+     requested_workers = int(usr_args.get("num_workers") or 1)
+     worker_num = max(1, min(requested_workers, test_num))
+@@ -685,6 +702,7 @@ def run_one_batch_episode(
+         task_env._set_eval_video_ffmpeg(ffmpeg)
+ 
+     succ = False
++    inference_latencies = []
+     prepare_policy_case(model_client, task_name, seed_value, instruction, action_type)
+     reset_policy(model_client)
+     try:
+@@ -698,7 +716,9 @@ def run_one_batch_episode(
+                 task_env=task_env,
+             )
+             model_client.call(func_name="update_obs", obs=xpl_obs)
++            infer_start = time.perf_counter()
+             action_chunk = normalize_action_chunk(model_client.call(func_name="get_action"))
++            inference_latencies.append(time.perf_counter() - infer_start)
+             if len(action_chunk) == 0:
+                 raise RuntimeError("Policy returned an empty action chunk.")
+ 
+@@ -737,6 +757,14 @@ def run_one_batch_episode(
+ 
+     notify_trial_end(model_client, task_name, seed_value, succ)
+ 
++    if inference_latencies:
++        values = np.asarray(inference_latencies, dtype=np.float64)
++        print(
++            f"[benchmark_timing] worker={worker_id} seed={seed_value} calls={len(values)} "
++            f"mean_s={values.mean():.4f} p50_s={np.percentile(values, 50):.4f} "
++            f"p95_s={np.percentile(values, 95):.4f} total_s={values.sum():.4f}"
++        )
++
+     task_env.close_env()
+     if task_env.render_freq:
+         task_env.viewer.close()
+@@ -747,6 +775,8 @@ def run_one_batch_episode(
+         "worker_id": worker_id,
+         "seed": seed_value,
+         "success": bool(succ),
++        "inference_calls": len(inference_latencies),
++        "inference_total_s": float(sum(inference_latencies)),
+     }
+ 
+ 
+@@ -808,7 +838,14 @@ def eval_remote_policy(
+             continue
+ 
+         args["render_freq"] = render_freq
+-        task_env.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
++        try:
++            task_env.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
++        except UnStableError:
++            task_env.close_env()
++            if not expert_check:
++                succ_seed -= 1
++            now_seed += 1
++            continue
+ 
+         instruction = build_instruction(args, episode_info, instruction_type, test_num)
+         task_env.set_instruction(instruction=instruction)
+@@ -843,11 +880,38 @@ def eval_remote_policy(
+             task_env._set_eval_video_ffmpeg(ffmpeg)
+ 
+         succ = False
+-        prepare_policy_case(model_client, task_name, now_seed, instruction, action_type)
+-        reset_policy(model_client)
++        inference_latencies = []
++        direct_lingbot = getattr(model_client, "_robotwin_protocol", "") == "lingbot_vla_v2"
++        if direct_lingbot:
++            model_client.infer({"reset": True, "robo_name": usr_args.get("robo_name", "robotwin")})
++        else:
++            prepare_policy_case(model_client, task_name, now_seed, instruction, action_type)
++            reset_policy(model_client)
+         try:
+             while not is_episode_end(task_env):
+                 observation = task_env.get_obs()
++                if direct_lingbot:
++                    request = {
++                        "observation.images.cam_high": observation["observation"]["head_camera"]["rgb"],
++                        "observation.images.cam_left_wrist": observation["observation"]["left_camera"]["rgb"],
++                        "observation.images.cam_right_wrist": observation["observation"]["right_camera"]["rgb"],
++                        "observation.state": observation["joint_action"]["vector"],
++                        "task": task_env.get_instruction(),
++                    }
++                    infer_start = time.perf_counter()
++                    response = model_client.infer(request)
++                    inference_latencies.append(time.perf_counter() - infer_start)
++                    action_chunk = normalize_action_chunk(response["action"])
++                    for action in action_chunk:
++                        task_env.take_action(np.asarray(action, dtype=np.float32))
++                        if task_env.eval_success:
++                            succ = True
++                            break
++                        if is_episode_end(task_env):
++                            break
++                    if succ:
++                        break
++                    continue
+                 xpl_obs = robotwin_obs_to_xpolicylab(
+                     observation,
+                     instruction=task_env.get_instruction(),
+@@ -856,7 +920,9 @@ def eval_remote_policy(
+                     task_env=task_env,
+                 )
+                 model_client.call(func_name="update_obs", obs=xpl_obs)
++                infer_start = time.perf_counter()
+                 action_chunk = normalize_action_chunk(model_client.call(func_name="get_action"))
++                inference_latencies.append(time.perf_counter() - infer_start)
+                 if len(action_chunk) == 0:
+                     raise RuntimeError("Policy returned an empty action chunk.")
+ 
+@@ -893,7 +959,16 @@ def eval_remote_policy(
+         if task_env.eval_video_path is not None:
+             task_env._del_eval_video_ffmpeg()
+ 
+-        notify_trial_end(model_client, task_name, now_seed, succ)
++        if not direct_lingbot:
++            notify_trial_end(model_client, task_name, now_seed, succ)
++
++        if inference_latencies:
++            values = np.asarray(inference_latencies, dtype=np.float64)
++            print(
++                f"[benchmark_timing] seed={now_seed} calls={len(values)} "
++                f"mean_s={values.mean():.4f} p50_s={np.percentile(values, 50):.4f} "
++                f"p95_s={np.percentile(values, 95):.4f} total_s={values.sum():.4f}"
++            )
+ 
+         if succ:
+             task_env.suc += 1
+@@ -921,6 +996,9 @@ def eval_remote_policy(
+ 
+ 
+ def build_instruction(args: dict[str, Any], episode_info: dict[str, Any], instruction_type: str | None, test_num: int) -> str:
++    instruction_override = args.get("instruction_override")
++    if instruction_override:
++        return str(instruction_override)
+     if not instruction_type:
+         return args["task_name"]
+ 
+@@ -1280,12 +1358,13 @@ def parse_args() -> dict[str, Any]:
+     parser.add_argument("--policy_name", required=True)
+     parser.add_argument("--host", default="localhost")
+     parser.add_argument("--port", required=True)
+-    parser.add_argument("--protocol", default="ws", choices=("ws", "legacy_tcp"))
++    parser.add_argument("--protocol", default="ws", choices=("ws", "legacy_tcp", "lingbot_vla_v2"))
+     parser.add_argument("--eval_batch", default="false")
+     parser.add_argument("--root_dir", default=str(ROBOTWIN_ROOT))
+     parser.add_argument("--device_id", default="0")
+     parser.add_argument("--additional_info", default="")
+     parser.add_argument("--seed", type=int, default=0)
++    parser.add_argument("--seed_start", type=int, default=None)
+     parser.add_argument("--task_config", default="demo_clean")
+     parser.add_argument("--test_num", type=int, default=None)
+     parser.add_argument("--instruction_type", choices=("seen", "unseen"))
+@@ -1311,6 +1390,8 @@ def parse_args() -> dict[str, Any]:
+         "xpolicylab_root": str(Path(args.root_dir).resolve() / "XPolicyLab"),
+         "eval_batch": parse_bool(args.eval_batch),
+     }
++    if args.seed_start is not None:
++        usr_args["seed_start"] = args.seed_start
+ 
+     if args.test_num is not None:
+         usr_args["test_num"] = args.test_num
+

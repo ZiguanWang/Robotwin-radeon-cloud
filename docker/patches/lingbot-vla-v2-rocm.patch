@@ -1,0 +1,231 @@
+diff --git a/deploy/lingbot_vla_v2_policy.py b/deploy/lingbot_vla_v2_policy.py
+index 96b9acb..0611313 100644
+--- a/deploy/lingbot_vla_v2_policy.py
++++ b/deploy/lingbot_vla_v2_policy.py
+@@ -288,6 +288,10 @@ class LingbotVLAv2Server:
+ 
+         # Set attention_implementation to 'eager' to speed up evaluation.
+         config.attention_implementation = 'eager'
++        config.vit_attn_implementation = 'eager'
++        # The official checkpoint enables a single-shape ViT cache. Disable it
++        # for the websocket server so one process can serve variable env batches.
++        config.precompute_grid_thw = False
+         
+         # set base model according to training config
+         training_base_model = training_config['model']['tokenizer_path']
+@@ -605,4 +609,4 @@ def main():
+ 
+ 
+ if __name__ == "__main__":
+-    main()
+\ No newline at end of file
++    main()
+diff --git a/lingbotvla/data/vla_data/base_dataset.py b/lingbotvla/data/vla_data/base_dataset.py
+index 71d62a0..93e5cec 100644
+--- a/lingbotvla/data/vla_data/base_dataset.py
++++ b/lingbotvla/data/vla_data/base_dataset.py
+@@ -24,7 +24,11 @@ from torchvision.transforms.v2 import Resize
+ try:
+     from lerobot.datasets.lerobot_dataset import LeRobotDataset as BaseLeRobotDataset
+     from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+-    from lerobot.datasets.utils import hf_transform_to_torch
++    try:
++        from lerobot.datasets.utils import hf_transform_to_torch
++    except ImportError:
++        # LeRobot 0.6 keeps the transform with the dataset reader.
++        from lerobot.datasets.dataset_reader import hf_transform_to_torch
+     LEROBOT_DATASET_API = "v3"
+ except ImportError:
+     from lerobot.common.datasets.lerobot_dataset import LeRobotDataset as BaseLeRobotDataset
+@@ -121,6 +125,11 @@ class LeRobotDataset(BaseLeRobotDataset):
+         return item
+ 
+     def __getitem__(self, idx) -> dict:
++        # LeRobot 0.6 moved delta-indexing and video decoding into
++        # DatasetReader. Reuse that implementation for v3 datasets instead of
++        # relying on the pre-0.6 attributes formerly exposed on the dataset.
++        if LEROBOT_DATASET_API == "v3" and hasattr(self, "_ensure_reader"):
++            return self._ensure_reader().get_item(idx)
+         # Ensure dataset is loaded when we actually need to read from it
+         item = self.hf_dataset[idx]
+         ep_idx = item["episode_index"].item()
+@@ -209,6 +218,7 @@ class VLADataset(Dataset):
+             repo_id=repo_id,
+             image_transforms=Resize(image_size),
+             delta_timestamps=merged_delta,
++            video_backend="pyav",
+             load_image=load_image
+         )
+ 
+@@ -283,4 +293,4 @@ class VLADataset(Dataset):
+ 
+     def __getitem__(self, idx):
+         item = self.getitem(idx)
+-        return item
+\ No newline at end of file
++        return item
+diff --git a/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py b/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
+index 44ccf04..5b68c1b 100644
+--- a/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
++++ b/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
+@@ -127,14 +127,15 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+         vlm_config = AutoConfig.from_pretrained(self.config.tokenizer_path)
+         if self.config.vocab_size not in (0, 257152):
+             vlm_config.text_config.vocab_size = self.config.vocab_size
+-        vlm_config._attn_implementation = "flash_attention_2"
+-        vlm_config.text_config._attn_implementation = "flash_attention_2"
++        attention_impl = getattr(self.config, "attention_implementation", "flash_attention_2")
++        vlm_config._attn_implementation = attention_impl
++        vlm_config.text_config._attn_implementation = attention_impl
+         vlm_config.vision_config._attn_implementation = self.config.vit_attn_implementation
+         self.qwenvl = Qwen3VLForConditionalGeneration._from_config(vlm_config)
+         if self.config.use_lm_head:
+             self.qwenvl.tie_weights()
+ 
+-        self.config.qwen_expert_config._attn_implementation = "flash_attention_2"
++        self.config.qwen_expert_config._attn_implementation = attention_impl
+         self.qwen_expert = Qwen2ForCausalLM._from_config(self.config.qwen_expert_config, eval=eval)
+ 
+         if getattr(self.config, "adanorm_time", False):
+diff --git a/lingbotvla/utils/arguments.py b/lingbotvla/utils/arguments.py
+index 4b8c495..6413247 100644
+--- a/lingbotvla/utils/arguments.py
++++ b/lingbotvla/utils/arguments.py
+@@ -939,8 +939,10 @@ def parse_args(rootclass: T) -> T:
+     for base, arg_dict in input_data.items():
+         for arg_name, arg_value in arg_dict.items():
+             if f"--{base}.{arg_name}=" not in cmd_args_string:  # lower priority
+-                # Skip list fields with None values to use default
+-                if f"{base}.{arg_name}" in list_fields and arg_value is None:
++                # Keep dataclass defaults for YAML nulls and empty lists. Passing
++                # them through argparse turns null into the string "null" and
++                # emits a list flag without values, respectively.
++                if arg_value is None or (f"{base}.{arg_name}" in list_fields and not arg_value):
+                     continue
+ 
+                 cmd_args.append(f"--{base}.{arg_name}")
+diff --git a/lingbotvla/utils/lora_utils.py b/lingbotvla/utils/lora_utils.py
+index ac16fdc..e974935 100644
+--- a/lingbotvla/utils/lora_utils.py
++++ b/lingbotvla/utils/lora_utils.py
+@@ -39,16 +39,27 @@ def add_lora_to_model(
+     if init_lora_weights == "kaiming":
+         init_lora_weights = True
+ 
++    # PEFT treats a string as a full regular expression and a list as suffix
++    # matches.  Keep both forms available so callers can constrain adapters to
++    # one branch of a multi-tower VLA model (for example qwen_expert only).
++    target_modules = (
++        lora_target_modules
++        if isinstance(lora_target_modules, str) and lora_target_modules.startswith(".*")
++        else [item.strip() for item in lora_target_modules.split(",") if item.strip()]
++        if isinstance(lora_target_modules, str)
++        else lora_target_modules
++    )
+     lora_config = LoraConfig(
+         r=lora_rank,
+         lora_alpha=lora_alpha,
+         init_lora_weights=init_lora_weights,
+-        target_modules=lora_target_modules.split(","),
++        target_modules=target_modules,
+     )
+ 
+-    for lora_target_module in lora_config.target_modules:
+-        if lora_target_module not in lora_target_modules_support:
+-            raise ValueError(f"lora_target_module {lora_target_module} not in lora_target_modules_support")
++    if lora_target_modules_support is not None and not isinstance(target_modules, str):
++        for lora_target_module in target_modules:
++            if lora_target_module not in lora_target_modules_support:
++                raise ValueError(f"lora_target_module {lora_target_module} not in lora_target_modules_support")
+ 
+     model = inject_adapter_in_model(lora_config, model)
+     for param in model.parameters():
+@@ -71,6 +82,7 @@ def add_lora_to_model(
+         print(
+             f"{num_updated_keys} parameters are loaded from {pretrained_lora_path}. {num_unexpected_keys} parameters are unexpected."
+         )
++    return model
+ 
+ 
+ def load_state_dict(file_path, torch_dtype=None):
+diff --git a/tasks/vla/train_lingbotvla.py b/tasks/vla/train_lingbotvla.py
+index a4427fe..2cbb02c 100644
+--- a/tasks/vla/train_lingbotvla.py
++++ b/tasks/vla/train_lingbotvla.py
+@@ -35,6 +35,7 @@ from lingbotvla.utils import helper
+ from lingbotvla.utils.async_hf_checkpoint import AsyncHFCheckpointSaver
+ from lingbotvla.utils.arguments import EvalArguments, DataArguments, ModelArguments, TrainingArguments, parse_args, save_args
+ from lingbotvla.utils.dist_utils import all_reduce
++from lingbotvla.utils.lora_utils import add_lora_to_model, freeze_parameters
+ from lingbotvla.models.config_registry import get_config_registry
+ 
+ from lingbotvla.models.vla.vision_models.module_utils import (
+@@ -117,6 +118,20 @@ def get_moe_param_groups(model: "torch.nn.Module", args_train) -> Optional[List[
+ 
+ @dataclass
+ class MyTrainingArguments(TrainingArguments):
++    use_lora: bool = field(
++        default=False,
++        metadata={"help": "Train PEFT LoRA adapters instead of full model weights."},
++    )
++    lora_rank: int = field(default=8, metadata={"help": "LoRA rank."})
++    lora_alpha: int = field(default=16, metadata={"help": "LoRA alpha."})
++    lora_scope: Literal["action_expert", "all_attention"] = field(
++        default="action_expert",
++        metadata={"help": "Apply LoRA to action expert attention or all attention layers."},
++    )
++    lora_target_modules: str = field(
++        default="q_proj,k_proj,v_proj,o_proj",
++        metadata={"help": "Comma-separated attention projection module names."},
++    )
+     freeze_vit: bool = field(
+         default=False,
+         metadata={"help": "Whether or not to freeze the vit parameters."},
+@@ -378,6 +393,31 @@ def main():
+         config_kwargs=config_kwargs,
+         moe_implementation=getattr(args.model, 'moe_implementation', None),
+     )
++    if args.train.use_lora:
++        if args.train.train_expert_only:
++            raise ValueError("use_lora=true requires train_expert_only=false; LoRA freezes base weights itself.")
++        freeze_parameters(model)
++        if args.train.lora_scope == "action_expert":
++            target_pattern = (
++                r".*qwenvl_with_expert\.qwen_expert\..*\."
++                r"(q_proj|k_proj|v_proj|o_proj)"
++            )
++        else:
++            target_pattern = args.train.lora_target_modules
++        model = add_lora_to_model(
++            model,
++            lora_rank=args.train.lora_rank,
++            lora_alpha=args.train.lora_alpha,
++            lora_target_modules=target_pattern,
++            lora_target_modules_support=None,
++        )
++        trainable = sum(param.numel() for param in model.parameters() if param.requires_grad)
++        total = sum(param.numel() for param in model.parameters())
++        logger.info_rank0(
++            f"LoRA enabled: scope={args.train.lora_scope}, rank={args.train.lora_rank}, "
++            f"alpha={args.train.lora_alpha}, trainable={trainable:,}/{total:,} "
++            f"({100.0 * trainable / total:.4f}%)"
++        )
+     use_depth_align = True if args.train.align_params != {} else False
+     use_future_depth = args.train.align_params.get('depth', {}).get('use_future_depth', False)
+     use_future_video = use_depth_align and args.train.align_params.get('use_future_video', False)
+
+diff --git a/lingbotvla/data/vla_data/utils.py b/lingbotvla/data/vla_data/utils.py
+--- a/lingbotvla/data/vla_data/utils.py
++++ b/lingbotvla/data/vla_data/utils.py
+@@ -85,6 +85,11 @@ class FeatureTransform:
+ 
+         if norm_stats_path is None:
+             norm_stats_path = robot_config.pop('norm_stats')
++            if not os.path.isabs(norm_stats_path):
++                repository_root = os.path.abspath(
++                    os.path.join(os.path.dirname(__file__), "../../..")
++                )
++                norm_stats_path = os.path.join(repository_root, norm_stats_path)
+         else:
+             robot_config.pop('norm_stats')
+ 

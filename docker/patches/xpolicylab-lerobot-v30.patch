@@ -1,0 +1,218 @@
+diff --git a/scripts/transform_lerobot_v30_format.py b/scripts/transform_lerobot_v30_format.py
+index c235782..7ed25a4 100644
+--- a/scripts/transform_lerobot_v30_format.py
++++ b/scripts/transform_lerobot_v30_format.py
+@@ -1,6 +1,7 @@
+ import argparse
+ import dataclasses
+ import fnmatch
++import os
+ import random
+ import shutil
+ import sys
+@@ -16,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
+     sys.path.insert(0, str(PROJECT_ROOT))
+ 
+ from lerobot.utils.constants import HF_LEROBOT_HOME
++from lerobot.configs.video import RGBEncoderConfig
+ from lerobot.datasets.lerobot_dataset import LeRobotDataset
+ 
+ from XPolicyLab.utils.data_loader import load
+@@ -65,14 +67,18 @@ class DatasetConfig:
+     # Usually 2 is enough
+     image_writer_threads: int = 2
+ 
+-    # Use streaming encoding so CRF can be overridden from this script
+-    # instead of relying on LeRobot's internal default of 30.
+-    streaming_encoding: bool = True
++    # Batch encoding is slower but avoids occasional frame loss observed with
++    # LeRobot 0.6.0's multi-camera streaming encoder.  CRF is supplied through
++    # RGBEncoderConfig for both batch and streaming modes.
++    streaming_encoding: bool = False
+ 
+     video_crf: int | None = 18
+ 
+-    # pyav is the fastest & most stable in community
+-    video_backend: str | None = "h264_nvenc"
++    # LeRobot's ``video_backend`` is the reader backend (pyav/torchcodec), not
++    # the FFmpeg encoder name.  Keep the CPU encoder separate so this works on
++    # AMD hosts without NVIDIA NVENC.
++    video_backend: str | None = os.environ.get("LEROBOT_VIDEO_BACKEND", "pyav")
++    video_codec: str = os.environ.get("LEROBOT_VIDEO_CODEC", "h264")
+ 
+ 
+ DEFAULT_DATASET_CONFIG = DatasetConfig()
+@@ -396,6 +402,37 @@ def _extract_action(data):
+     raise ValueError("Cannot find action data")
+ 
+ 
++def _extract_ee_pose_gripper(data, section):
++    """Return official RoboTwin action layout: [pose7, gripper] x 2."""
++    parts = []
++    for side in ("left", "right"):
++        pose = _ensure_2d_float32(
++            _get_nested(data, section, f"{side}_ee_poses"),
++            f"{section}.{side}_ee_poses",
++        )
++        gripper = _ensure_2d_float32(
++            _get_nested(data, section, f"{side}_ee_joint_states"),
++            f"{section}.{side}_ee_joint_states",
++        )
++        if pose.shape[0] != gripper.shape[0] or pose.shape[1] != 7 or gripper.shape[1] != 1:
++            raise ValueError(
++                f"invalid {section} {side} EE shapes: pose={pose.shape}, gripper={gripper.shape}"
++            )
++        parts.extend((pose, gripper))
++    return np.concatenate(parts, axis=1)
++
++
++def _ee_motor_names():
++    names = []
++    for side in ("left", "right"):
++        names.extend([
++            f"{side}_x", f"{side}_y", f"{side}_z",
++            f"{side}_qx", f"{side}_qy", f"{side}_qz", f"{side}_qw",
++            f"{side}_gripper",
++        ])
++    return names
++
++
+ def _pad_state_to_target_dims(array, current_dims, target_dims, name):
+     arr = _ensure_2d_float32(array, name)
+ 
+@@ -615,6 +652,11 @@ def create_empty_dataset(
+ 
+         streaming_encoding=dataset_config.streaming_encoding,
+         video_backend=dataset_config.video_backend,
++        rgb_encoder=RGBEncoderConfig(
++            vcodec=dataset_config.video_codec,
++            crf=dataset_config.video_crf,
++            video_backend="pyav",
++        ),
+     )
+ 
+ 
+@@ -622,7 +664,15 @@ def configure_video_encoding(dataset: Any, dataset_config: DatasetConfig) -> Non
+     if not dataset_config.use_videos:
+         return
+ 
+-    streaming_encoder = getattr(dataset, "_streaming_encoder", None)
++    if not dataset_config.streaming_encoding:
++        return
++
++    # In LeRobot 0.6.0 the streaming encoder belongs to DatasetWriter.  Older
++    # revisions exposed it directly on LeRobotDataset, so support both layouts.
++    writer = getattr(dataset, "writer", None)
++    streaming_encoder = getattr(writer, "_streaming_encoder", None)
++    if streaming_encoder is None:
++        streaming_encoder = getattr(dataset, "_streaming_encoder", None)
+ 
+     if streaming_encoder is None:
+         raise RuntimeError(
+@@ -630,11 +680,16 @@ def configure_video_encoding(dataset: Any, dataset_config: DatasetConfig) -> Non
+             "but no streaming encoder was initialized."
+         )
+ 
+-    streaming_encoder.crf = dataset_config.video_crf
++    # CRF is supplied through RGBEncoderConfig at construction time in 0.6.0.
++    # Retain this check to catch a silently disabled streaming path.
+ 
+ 
+ def finalize_dataset(dataset: Any) -> None:
+ 
++    if hasattr(dataset, "finalize"):
++        dataset.finalize()
++        return
++
+     if hasattr(dataset, "stop_image_writer"):
+         dataset.stop_image_writer()
+ 
+@@ -657,6 +712,7 @@ def convert_one(
+     target_dims,
+     image_height,
+     image_width,
++    control_mode,
+ ):
+ 
+     data = load(
+@@ -665,8 +721,12 @@ def convert_one(
+         data_version=data_version,
+     )
+ 
+-    state = _extract_qpos(data)
+-    action = _extract_action(data)
++    if control_mode == "ee":
++        state = _extract_ee_pose_gripper(data, "state")
++        action = _extract_ee_pose_gripper(data, "action")
++    else:
++        state = _extract_qpos(data)
++        action = _extract_action(data)
+ 
+     if state.shape != action.shape:
+         raise ValueError(
+@@ -674,19 +734,13 @@ def convert_one(
+             f"{state.shape} vs {action.shape}"
+         )
+ 
+-    state = _pad_state_to_target_dims(
+-        state,
+-        current_dims,
+-        target_dims,
+-        "state",
+-    )
+-
+-    action = _pad_state_to_target_dims(
+-        action,
+-        current_dims,
+-        target_dims,
+-        "action",
+-    )
++    if control_mode == "joint":
++        state = _pad_state_to_target_dims(
++            state, current_dims, target_dims, "state",
++        )
++        action = _pad_state_to_target_dims(
++            action, current_dims, target_dims, "action",
++        )
+ 
+     instruction = _choose_instruction(data)
+ 
+@@ -818,6 +872,13 @@ def main():
+         default=None,
+     )
+ 
++    parser.add_argument(
++        "--control_mode",
++        choices=("joint", "ee"),
++        default="joint",
++        help="Use joint actions or official RoboTwin [EE pose7 + gripper] x2 actions.",
++    )
++
+     parser.add_argument(
+         "--data_type",
+         type=str,
+@@ -880,7 +941,7 @@ def main():
+         or f"unified_{'_'.join(pattern.replace('*', 'all').replace('.', '_') for pattern in args.patterns)}".lower()
+     )
+ 
+-    motors = _build_motor_names_from_dims(target_dims)
++    motors = _ee_motor_names() if args.control_mode == "ee" else _build_motor_names_from_dims(target_dims)
+ 
+     dataset = create_empty_dataset(
+         repo_id=repo_id,
+@@ -960,6 +1021,7 @@ def main():
+                         target_dims,
+                         image_height,
+                         image_width,
++                        args.control_mode,
+                     )
+ 
+                     task_success += 1
+@@ -996,4 +1058,4 @@ def main():
+ 
+ 
+ if __name__ == "__main__":
+-    main()
+\ No newline at end of file
++    main()
+
