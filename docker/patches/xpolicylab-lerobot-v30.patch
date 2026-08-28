@@ -208,11 +208,3 @@ index c235782..7ed25a4 100644
                      )
  
                      task_success += 1
-@@ -996,4 +1058,4 @@ def main():
- 
- 
- if __name__ == "__main__":
--    main()
-\ No newline at end of file
-+    main()
-

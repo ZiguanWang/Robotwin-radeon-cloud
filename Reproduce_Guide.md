@@ -230,10 +230,13 @@ git -C XPolicyLab rev-parse HEAD
 git -C experiments/lingbot_vla_v2_6b_robotwin/source/lingbot-vla-v2 rev-parse HEAD
 
 /opt/robotwin-env/bin/python - <<'PY'
-import torch, open3d, sapien, mplib, lerobot
+import aiter, flash_attn, torch, triton
+import open3d, sapien, mplib, lerobot
 print(torch.__version__, torch.version.hip)
+print("Triton:", triton.__version__, "FlashAttention2:", flash_attn.__version__)
 print("GPU count:", torch.cuda.device_count())
 assert torch.cuda.is_available()
+assert flash_attn.__version__ == "2.8.4"
 x = torch.randn(1024, 1024, device="cuda")
 print((x @ x).shape)
 PY
@@ -390,7 +393,9 @@ done
 这会执行 50 × 10 个 episode。需要中断后继续时，可以直接把 `TASKS` 替换为尚未
 完成的任务名列表。
 
-## 7. LoRA 训练
+## 7. LoRA 训练、合并 checkpoint 并重新推理
+
+### 7.1 LoRA 训练
 
 默认使用单卡训练：
 
@@ -454,6 +459,17 @@ PyTorch Distributed Data Parallel；`HIP_VISIBLE_DEVICES` 中的 GPU 数量必�
 /workspace/runtime/outputs/reproduction_100steps
 ```
 
+这里有三项名称相近但用途不同的 attention 配置：
+
+- `model.attn_implementation: flash_attention_2`：用于 Hugging Face/Qwen 模型。
+- `model.vit_attn_implementation: flash_attention_2`：用于视觉编码器。
+- `train.attention_implementation: flex_cached`：用于 VLM 与 action expert 的联合注意力；
+  该路径使用自定义二维 block mask，不能设置为 `flash_attention_2`，否则会报
+  `Invalid attention implementation`。
+
+旧版数据清单中如果仍含 `/workspace/RoboTwin/data/...`，镜像内的数据加载兼容补丁会在
+对应 `/RoboTwin/data/...` 目录确实存在时自动映射，无需修改持久化数据文件。
+
 YAML 中的 `train.max_steps: 100` 只用于验证数据读取、前后向、保存和合并链路，
 通常不足以获得有代表性的微调效果。Notebook 可以直接修改：
 
@@ -473,7 +489,7 @@ Notebook 会同步覆盖 `--train.max_steps`、`--train.save_steps` 和
 --train.output_dir /workspace/runtime/outputs/reproduction_1000steps
 ```
 
-## 8. 合并 checkpoint 并重新推理
+### 7.2 合并 LoRA checkpoint 并重新推理
 
 ```bash
 cd /RoboTwin
@@ -523,6 +539,170 @@ bash scripts/eval_policy.sh \
 确认 `adjust_bottle` 正常后，可使用第 6 节的全部任务循环，在同一个 13400 服务上
 评测合并后的 checkpoint。建议将旧模型和合并模型的 `/workspace/runtime/eval_result`
 结果分别备份，避免同任务、同 seed 的结果混淆。
+
+## 8. 全量 SFT、转换 checkpoint 并重新推理
+
+这是与第 7 节 LoRA 相互独立的训练流程。全量 SFT 会更新模型的全部可训练参数，不能使用
+LoRA 的 `merge_lora_dcp.py`。先停止占用 GPU 的模型 server，然后运行 1 step smoke test：
+
+### 8.1 全量 SFT 训练
+
+脚本支持 1、2、4 卡，默认使用 4 卡。与 LoRA 训练相同，有效 global batch 始终保持为 4：
+
+| GPU 数 | `data_parallel_shard_size` | `gradient_accumulation_steps` | `global_batch_size` |
+|---:|---:|---:|---:|
+| 1 | 1 | 4 | 4 |
+| 2 | 2 | 2 | 4 |
+| 4（默认） | 4 | 1 | 4 |
+
+单卡 1-step smoke test：
+
+```bash
+cd /RoboTwin
+GPU_COUNT=1 MAX_STEPS=1 SAVE_STEPS=1 \
+OUTPUT_DIR=/workspace/runtime/outputs/full_sft_1gpu_1step \
+bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
+```
+
+双卡 1-step smoke test：
+
+```bash
+cd /RoboTwin
+GPU_COUNT=2 MAX_STEPS=1 SAVE_STEPS=1 \
+OUTPUT_DIR=/workspace/runtime/outputs/full_sft_2gpu_1step \
+bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
+```
+
+双卡 48 GB 可以优先按这条命令评估，建议保持 `enable_full_shard=true` 和 gradient
+checkpointing，并在另一个终端持续观察两张卡的显存。卡数减少后，每张卡承担的参数、梯度
+和 optimizer 分片都会增大，因此不能从四卡结果直接保证双卡一定不 OOM；只有 1 step 完整
+通过 forward、backward 和 optimizer step，才能继续增加训练步数。
+
+默认四卡 1-step smoke test：
+
+```bash
+cd /RoboTwin
+
+MAX_STEPS=1 \
+SAVE_STEPS=1 \
+OUTPUT_DIR=/workspace/runtime/outputs/full_sft_4gpu_1step \
+bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
+```
+
+脚本使用以下关键参数，其中 shard size 和梯度累积由 `GPU_COUNT` 自动计算：
+
+```text
+use_lora=false
+data_parallel_mode=fsdp2
+data_parallel_replicate_size=1
+data_parallel_shard_size=GPU_COUNT
+micro_batch_size=1
+gradient_accumulation_steps=4/GPU_COUNT
+global_batch_size=4
+enable_gradient_checkpointing=true
+enable_full_shard=true
+```
+
+确认四个 rank 都完成 forward、backward、optimizer step 和 DCP 保存后，再运行所需步数：
+
+```bash
+GPU_COUNT=4 \
+MAX_STEPS=100 \
+SAVE_STEPS=100 \
+OUTPUT_DIR=/workspace/runtime/outputs/full_sft_4gpu_100steps \
+bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
+```
+
+`MAX_STEPS=100` 仍主要用于验证完整流程。正式微调时根据验证集结果增加训练步数，并用较小的
+`SAVE_STEPS` 定期保存。
+
+每个全量 DCP checkpoint 目录约为 70 GB，这是所有 rank 写出的分片文件合计，不是每张卡
+各写 70 GB。checkpoint 同时保存训练所需的完整模型参数和 AdamW optimizer 状态；AdamW
+通常为每个参数保存一阶、二阶矩，因此 optimizer 部分往往比模型权重本身更大。此外还有
+学习率调度器、随机数和 dataloader 状态。改变 GPU 数主要改变分片文件的数量和单片大小，
+不会按比例降低整个 checkpoint 的总容量。应提前检查 `/workspace/runtime` 的可用空间；如果
+只需要部署，可以在转换出 Hugging Face checkpoint 并确认可加载后删除不再需要的 DCP。
+
+### 8.2 `enable_full_shard` 的选择
+
+该参数在 FSDP2 中传给 `reshard_after_forward`，不是“是否启用 FSDP”的开关：
+
+- `true`：每个 FSDP 模块完成 forward 后重新分片；峰值显存更低，但 backward 前需要再次
+  all-gather。复现脚本默认使用此设置。
+- `false`：forward 后保留当前模块的完整参数直到 backward；可以减少一次 all-gather，
+  可能更快，但通常占用更多峰值显存。模型整体仍然使用 FSDP2 分片。
+
+四卡可以使用以下三种配置，正式复现默认选择第一种：
+
+| 配置 | 关键参数 | 用途 |
+|---|---|---|
+| 四卡基础全量 SFT | shard 4、global batch 4、full shard | 本节默认的四卡复现配置 |
+| 四卡 no-reshard | shard 4、global batch 4、`enable_full_shard=false` | 比较少一次参数 all-gather 的速度和显存代价 |
+| 四卡 FP32/future-image 变体 | shard 4、full shard、`enable_fp32=true`、`use_future_image=true` | 检查额外训练开关；若 `align_params={}`，它不代表完整 depth/video alignment 训练 |
+
+三种配置都设置 `use_lora=false`、micro batch 1、gradient checkpointing，并执行全参数
+forward、backward 和 optimizer step。它们是可选配置，不是三个连续训练阶段，也不需要
+全部运行。
+
+需要比较 no-reshard 时，只覆盖一个环境变量：
+
+```bash
+ENABLE_FULL_SHARD=false \
+MAX_STEPS=1 \
+SAVE_STEPS=1 \
+OUTPUT_DIR=/workspace/runtime/outputs/full_sft_4gpu_no_reshard_1step \
+bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
+```
+
+### 8.3 将全量 DCP 转换为推理 checkpoint 并重新推理
+
+全量 SFT 没有 LoRA adapter，因此这里是把分布式 DCP 聚合并保存为 Hugging Face 格式，
+不是把 adapter 合并回基础模型：
+
+```bash
+cd /RoboTwin
+source /opt/robotwin-env/bin/activate
+
+TRAIN_OUTPUT=/workspace/runtime/outputs/full_sft_4gpu_100steps
+CHECKPOINT="$TRAIN_OUTPUT/checkpoints/global_step_100"
+FULL_SFT_MODEL="$TRAIN_OUTPUT/merged_checkpoint/global_step_100/hf_ckpt"
+
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/convert_full_sft_dcp.py \
+  --checkpoint "$CHECKPOINT" \
+  --training-output "$TRAIN_OUTPUT" \
+  --output "$FULL_SFT_MODEL"
+```
+
+启动全量 SFT 模型，继续复用 13400 接口：
+
+```bash
+bash experiments/lingbot_vla_v2_6b_robotwin/scripts/launch_official_server.sh \
+  0 13400 /workspace/runtime/outputs/logs/full_sft_server.log False "$FULL_SFT_MODEL"
+```
+
+在另一个终端等待服务就绪并运行闭环评测：
+
+```bash
+until curl -fsS http://127.0.0.1:13400/healthz; do sleep 2; done
+
+cd /RoboTwin
+source /opt/robotwin-env/bin/activate
+
+bash scripts/eval_policy.sh \
+  --task_name adjust_bottle \
+  --task_config demo_clean \
+  --policy_name LingBot-VLA-v2 \
+  --protocol lingbot_vla_v2 \
+  --host 127.0.0.1 \
+  --port 13400 \
+  --device_id 0 \
+  --seed 0 \
+  --test_num 10 \
+  --expert_check false \
+  --eval_batch false
+```
+
+确认单任务正常后，可直接复用第 6 节的全部任务循环。
 
 # 第二部分：从干净基础镜像或本机安装
 
@@ -600,7 +780,6 @@ cp -a /path/to/RoboTwin-radeon-cloud/docker/assets/experiments/lingbot_vla_v2_6b
 
 这些补丁完成：
 
-- 禁用 CUDA FlashAttention2，使用 eager attention；
 - 使用 MPLib 替代 CuRobo；
 - 兼容 LeRobot 0.6 数据读取接口；
 - 注册 action-expert LoRA 参数；
@@ -643,6 +822,69 @@ python -m pip install --no-deps -e \
 不要安装上游完整 requirements 文件，其中固定的 CUDA/PyPI torch、triton 或
 flash-attn 会覆盖 ROCm torch。`requirements-no-deps.txt` 必须保留 `--no-deps`，
 否则 LeRobot 的依赖解析会替换主清单中已经验证的版本。
+
+### 11.1 安装 ROCm FlashAttention2
+
+先安装固定版本的 AITER，并强制复用 ROCm PyTorch 环境自带的 Triton：
+
+```bash
+git clone https://github.com/ROCm/aiter.git /opt/aiter
+git -C /opt/aiter checkout 9bab8388c35936814a659b4ebd245c491e1b940a
+test "$(git -C /opt/aiter rev-parse HEAD)" = \
+  9bab8388c35936814a659b4ebd245c491e1b940a
+
+cd /opt/aiter
+AITER_USE_SYSTEM_TRITON=1 \
+  /opt/robotwin-env/bin/python setup.py develop
+```
+
+然后安装固定的 AMD FlashAttention2 fork。`--no-deps` 和
+`FLASH_ATTENTION_USE_SYSTEM_AITER=TRUE` 用于防止 pip 安装第二份 AITER、Triton 或
+PyTorch：
+
+```bash
+git clone https://github.com/ZiguanWang/flash-attention.git \
+  /opt/flash-attention-source
+git -C /opt/flash-attention-source checkout \
+  bc76302fbb24c0158207978930db030ca1eca5ca
+test "$(git -C /opt/flash-attention-source rev-parse HEAD)" = \
+  bc76302fbb24c0158207978930db030ca1eca5ca
+
+cd /opt/flash-attention-source
+PYTHONPATH=/opt/aiter \
+FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
+FLASH_ATTENTION_USE_SYSTEM_AITER=TRUE \
+  /opt/robotwin-env/bin/python -m pip install \
+  --no-build-isolation --no-deps .
+```
+
+每次启动新 shell 时保留 `AITER_USE_SYSTEM_TRITON=1`，然后执行导入检查：
+
+```bash
+export AITER_USE_SYSTEM_TRITON=1
+export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
+export FLASH_ATTENTION_USE_SYSTEM_AITER=TRUE
+export PYTHONPATH=/opt/aiter${PYTHONPATH:+:${PYTHONPATH}}
+
+/opt/robotwin-env/bin/python - <<'PY'
+import aiter
+import flash_attn
+import torch
+import triton
+
+print("torch:", torch.__version__, "HIP:", torch.version.hip)
+print("triton:", triton.__version__)
+print("flash_attn:", flash_attn.__version__)
+assert torch.version.hip is not None
+assert flash_attn.__version__ == "2.8.4"
+PY
+```
+
+当前基础镜像自带的 Triton 与 PyTorch/ROCm 配套，不能为了满足 AITER 的版本提示而单独
+升级或降级 Triton。该组合可能提示 AITER 更偏好 Triton 3.6，也可能提示找不到
+`flash_attn_2_cuda` 而使用 Triton AMD fallback；这不代表安装失败。模型补丁不再覆盖上游
+attention 默认值，镜像内置训练配置也使用 `flash_attention_2`。若某个独立算子不兼容，
+可在对应实验配置中显式改回 `eager` 进行诊断。
 
 模型环境准备完成后下载 RoboTwin 仿真资产：
 

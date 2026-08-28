@@ -7,6 +7,9 @@ IMAGE_NAME="${IMAGE_NAME:-robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_p
 BASE_IMAGE="${BASE_IMAGE:-rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1}"
 ROBOTWIN_COMMIT="${ROBOTWIN_COMMIT:-266f3aadf505a4f7fe9af0faa41a20f5f47cd123}"
 LINGBOT_VLA_COMMIT="${LINGBOT_VLA_COMMIT:-951475ae1b1d87553e7dc47c97b53a3d695c0d13}"
+AITER_COMMIT="${AITER_COMMIT:-9bab8388c35936814a659b4ebd245c491e1b940a}"
+FLASH_ATTENTION_COMMIT="${FLASH_ATTENTION_COMMIT:-bc76302fbb24c0158207978930db030ca1eca5ca}"
+AITER_GPU_ARCHS="${AITER_GPU_ARCHS:-gfx1100;gfx1201}"
 
 build_args=(
   --file "${SCRIPT_DIR}/Dockerfile"
@@ -14,6 +17,9 @@ build_args=(
   --build-arg "BASE_IMAGE=${BASE_IMAGE}"
   --build-arg "ROBOTWIN_COMMIT=${ROBOTWIN_COMMIT}"
   --build-arg "LINGBOT_VLA_COMMIT=${LINGBOT_VLA_COMMIT}"
+  --build-arg "AITER_COMMIT=${AITER_COMMIT}"
+  --build-arg "FLASH_ATTENTION_COMMIT=${FLASH_ATTENTION_COMMIT}"
+  --build-arg "AITER_GPU_ARCHS=${AITER_GPU_ARCHS}"
   --progress plain
 )
 

@@ -18,6 +18,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ROBOTWIN_DISABLE_CUROBO=1 \
     ROBOTWIN_EE_PLANNER=mplib \
     TOKENIZERS_PARALLELISM=false \
+    AITER_USE_SYSTEM_TRITON=1 \
+    FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
+    FLASH_ATTENTION_USE_SYSTEM_AITER=TRUE \
     ROBOTWIN_ROOT=/RoboTwin \
     LINGBOT_VLA_SOURCE=/RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/source/lingbot-vla-v2 \
     QWEN3VL_PATH=/RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/models/Qwen3-VL-4B-Instruct-config-tokenizer
@@ -25,6 +28,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
 ARG PIP_INDEX_URL=
 ARG ROBOTWIN_COMMIT=266f3aadf505a4f7fe9af0faa41a20f5f47cd123
 ARG LINGBOT_VLA_COMMIT=951475ae1b1d87553e7dc47c97b53a3d695c0d13
+ARG AITER_COMMIT=9bab8388c35936814a659b4ebd245c491e1b940a
+ARG FLASH_ATTENTION_COMMIT=bc76302fbb24c0158207978930db030ca1eca5ca
+ARG AITER_GPU_ARCHS=gfx1100;gfx1201
 ARG LINGBOT_MODEL_REVISION=0451855729ec904f970600e0aec8b84661423afe
 ARG QWEN_CONFIG_REVISION=ebb281ec70b05090aa6165b016eac8ec08e71b17
 ARG ROBOTWIN_DATA_REVISION=a967b852afa21a9cbf19a198f7e653109042e87c
@@ -89,6 +95,42 @@ PY
 # when video/point-cloud logging is disabled. Python 3.12 wheels start at 0.19.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     /opt/robotwin-env/bin/python -m pip install --prefer-binary 'open3d==0.19.0'
+
+ENV PYTHONPATH=/opt/aiter
+
+COPY patches/flash-attention-no-gpu-build.patch /tmp/
+
+# Build the tested AMD FlashAttention2 stack without allowing either project
+# to replace the ROCm image's PyTorch-matched Triton package.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    git clone https://github.com/ROCm/aiter.git /opt/aiter && \
+    git -C /opt/aiter checkout "${AITER_COMMIT}" && \
+    cd /opt/aiter && \
+    GPU_ARCHS="${AITER_GPU_ARCHS}" AITER_USE_SYSTEM_TRITON=1 \
+        /opt/robotwin-env/bin/python setup.py develop && \
+    git clone https://github.com/ZiguanWang/flash-attention.git /tmp/flash-attention && \
+    git -C /tmp/flash-attention checkout "${FLASH_ATTENTION_COMMIT}" && \
+    cd /tmp/flash-attention && \
+    git apply /tmp/flash-attention-no-gpu-build.patch && \
+    GPU_ARCHS="${AITER_GPU_ARCHS}" \
+    FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
+    FLASH_ATTENTION_USE_SYSTEM_AITER=TRUE \
+        /opt/robotwin-env/bin/python -m pip install \
+        --no-build-isolation --no-deps . && \
+    cd / && rm -rf /tmp/flash-attention
+
+RUN /opt/robotwin-env/bin/python - <<'PY'
+from importlib.metadata import version
+
+import triton
+
+assert version("flash-attn") == "2.8.4"
+print(
+    "FlashAttention2:", version("flash-attn"),
+    "AITER:", version("amd-aiter"),
+    "Triton:", triton.__version__,
+)
+PY
 
 # Bake the exact GitHub revisions and the ROCm/LeRobot compatibility patches
 # exercised by this reproduction into the image.

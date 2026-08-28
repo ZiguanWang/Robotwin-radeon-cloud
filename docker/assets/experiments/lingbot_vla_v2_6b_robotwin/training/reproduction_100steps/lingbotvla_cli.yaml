@@ -37,7 +37,7 @@ data:
   use_future_image: false
 model:
   adanorm_time: true
-  attn_implementation: eager
+  attn_implementation: flash_attention_2
   basic_modules: []
   config_key: LingbotVLAV2Config
   config_path: /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/models/robbyant_lingbot-vla-v2-6b-robotwin/checkpoints/global_step_50000/hf_ckpt
@@ -54,7 +54,7 @@ model:
   post_training: false
   tokenizer_path: /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/models/Qwen3-VL-4B-Instruct-config-tokenizer
   use_lm_head: false
-  vit_attn_implementation: eager
+  vit_attn_implementation: flash_attention_2
   vlm_repo_id: null
   vocab_size: 0
 train:
@@ -65,7 +65,10 @@ train:
   allow_partial_checkpoint: false
   async_hf_max_pending: 1
   async_save_hf_weights: false
-  attention_implementation: eager
+  # Joint VLM/action-expert attention uses a custom 2D block mask. Keep the
+  # upstream-supported implementation here; model/vit attention above still
+  # uses FlashAttention2.
+  attention_implementation: flex_cached
   bias_centering: false
   bias_update_interval: 1
   bias_update_speed: 0.0

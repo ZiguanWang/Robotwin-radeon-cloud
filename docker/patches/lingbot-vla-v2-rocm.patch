@@ -2,24 +2,16 @@ diff --git a/deploy/lingbot_vla_v2_policy.py b/deploy/lingbot_vla_v2_policy.py
 index 96b9acb..0611313 100644
 --- a/deploy/lingbot_vla_v2_policy.py
 +++ b/deploy/lingbot_vla_v2_policy.py
-@@ -288,6 +288,10 @@ class LingbotVLAv2Server:
+@@ -288,6 +288,9 @@ class LingbotVLAv2Server:
  
          # Set attention_implementation to 'eager' to speed up evaluation.
          config.attention_implementation = 'eager'
-+        config.vit_attn_implementation = 'eager'
 +        # The official checkpoint enables a single-shape ViT cache. Disable it
 +        # for the websocket server so one process can serve variable env batches.
 +        config.precompute_grid_thw = False
          
          # set base model according to training config
          training_base_model = training_config['model']['tokenizer_path']
-@@ -605,4 +609,4 @@ def main():
- 
- 
- if __name__ == "__main__":
--    main()
-\ No newline at end of file
-+    main()
 diff --git a/lingbotvla/data/vla_data/base_dataset.py b/lingbotvla/data/vla_data/base_dataset.py
 index 71d62a0..93e5cec 100644
 --- a/lingbotvla/data/vla_data/base_dataset.py
@@ -57,36 +49,36 @@ index 71d62a0..93e5cec 100644
              load_image=load_image
          )
  
-@@ -283,4 +293,4 @@ class VLADataset(Dataset):
- 
-     def __getitem__(self, idx):
-         item = self.getitem(idx)
--        return item
-\ No newline at end of file
-+        return item
-diff --git a/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py b/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
-index 44ccf04..5b68c1b 100644
---- a/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
-+++ b/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
-@@ -127,14 +127,15 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
-         vlm_config = AutoConfig.from_pretrained(self.config.tokenizer_path)
-         if self.config.vocab_size not in (0, 257152):
-             vlm_config.text_config.vocab_size = self.config.vocab_size
--        vlm_config._attn_implementation = "flash_attention_2"
--        vlm_config.text_config._attn_implementation = "flash_attention_2"
-+        attention_impl = getattr(self.config, "attention_implementation", "flash_attention_2")
-+        vlm_config._attn_implementation = attention_impl
-+        vlm_config.text_config._attn_implementation = attention_impl
-         vlm_config.vision_config._attn_implementation = self.config.vit_attn_implementation
-         self.qwenvl = Qwen3VLForConditionalGeneration._from_config(vlm_config)
-         if self.config.use_lm_head:
-             self.qwenvl.tie_weights()
- 
--        self.config.qwen_expert_config._attn_implementation = "flash_attention_2"
-+        self.config.qwen_expert_config._attn_implementation = attention_impl
-         self.qwen_expert = Qwen2ForCausalLM._from_config(self.config.qwen_expert_config, eval=eval)
- 
-         if getattr(self.config, "adanorm_time", False):
+diff --git a/lingbotvla/data/vla_data/multi_vla_dataset.py b/lingbotvla/data/vla_data/multi_vla_dataset.py
+index 1923aa6..422c445 100644
+--- a/lingbotvla/data/vla_data/multi_vla_dataset.py
++++ b/lingbotvla/data/vla_data/multi_vla_dataset.py
+@@ -1,3 +1,5 @@
++import os
++from pathlib import Path
+ from typing import Callable
+ import numpy as np
+ from lingbotvla.utils import helper
+@@ -22,6 +24,19 @@ def get_all_tasks(task_files, sep=' '):
+                 if not line:
+                     continue
+                 data_name, task = line.split(sep)
++                task_path = Path(task).expanduser()
++                if not task_path.exists():
++                    try:
++                        relative_path = task_path.relative_to("/workspace/RoboTwin")
++                    except ValueError:
++                        pass
++                    else:
++                        relocated_path = (
++                            Path(os.environ.get("ROBOTWIN_ROOT", "/RoboTwin"))
++                            / relative_path
++                        )
++                        if relocated_path.exists():
++                            task = str(relocated_path)
+                 data_names.append(data_name)
+                 task_list.append(task)
+         f.close()
 diff --git a/lingbotvla/utils/arguments.py b/lingbotvla/utils/arguments.py
 index 4b8c495..6413247 100644
 --- a/lingbotvla/utils/arguments.py
