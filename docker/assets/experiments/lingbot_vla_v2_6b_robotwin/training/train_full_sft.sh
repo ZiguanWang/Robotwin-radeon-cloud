@@ -11,6 +11,12 @@ GPU_COUNT="${GPU_COUNT:-4}"
 MAX_STEPS="${MAX_STEPS:-100}"
 SAVE_STEPS="${SAVE_STEPS:-${MAX_STEPS}}"
 ENABLE_FULL_SHARD="${ENABLE_FULL_SHARD:-true}"
+DATA_PARALLEL_MODE="${DATA_PARALLEL_MODE:-fsdp2}"
+ENABLE_FSDP_OFFLOAD="${ENABLE_FSDP_OFFLOAD:-false}"
+ENABLE_ACTIVATION_OFFLOAD="${ENABLE_ACTIVATION_OFFLOAD:-false}"
+ACTIVATION_GPU_LIMIT="${ACTIVATION_GPU_LIMIT:-0.0}"
+MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
+GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-4}"
 OUTPUT_DIR="${OUTPUT_DIR:-/workspace/runtime/outputs/full_sft_${GPU_COUNT}gpu_${MAX_STEPS}steps}"
 DATA_LIST="${DATA_LIST:-${ROBOTWIN_ROOT}/data/robotwin_demo_clean_joint_v30.txt}"
 CONFIG="${CONFIG:-${ROBOTWIN_ROOT}/experiments/lingbot_vla_v2_6b_robotwin/training/reproduction_100steps/lingbotvla_cli.yaml}"
@@ -21,21 +27,22 @@ LOG_DIR="/workspace/runtime/outputs/logs"
 case "${GPU_COUNT}" in
   1)
     DEFAULT_GPU_IDS="0"
-    GRADIENT_ACCUMULATION_STEPS=4
+    DEFAULT_GRADIENT_ACCUMULATION_STEPS=4
     ;;
   2)
     DEFAULT_GPU_IDS="0,1"
-    GRADIENT_ACCUMULATION_STEPS=2
+    DEFAULT_GRADIENT_ACCUMULATION_STEPS=2
     ;;
   4)
     DEFAULT_GPU_IDS="0,1,2,3"
-    GRADIENT_ACCUMULATION_STEPS=1
+    DEFAULT_GRADIENT_ACCUMULATION_STEPS=1
     ;;
   *)
     echo "GPU_COUNT must be 1, 2, or 4; got ${GPU_COUNT}" >&2
     exit 2
     ;;
 esac
+GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-${DEFAULT_GRADIENT_ACCUMULATION_STEPS}}"
 GPU_IDS="${GPU_IDS:-${DEFAULT_GPU_IDS}}"
 if [[ "$(awk -F, '{print NF}' <<<"${GPU_IDS}")" -ne "${GPU_COUNT}" ]]; then
   echo "GPU_IDS (${GPU_IDS}) must contain exactly ${GPU_COUNT} device IDs" >&2
@@ -57,7 +64,6 @@ if grep -q '/workspace/RoboTwin/' "${DATA_LIST}"; then
 fi
 
 export HIP_VISIBLE_DEVICES="${GPU_IDS}"
-export AITER_USE_SYSTEM_TRITON="${AITER_USE_SYSTEM_TRITON:-1}"
 unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
 
 cd "${SOURCE_DIR}"
@@ -70,13 +76,16 @@ cd "${SOURCE_DIR}"
   --train.output_dir "${OUTPUT_DIR}" \
   --train.use_lora false \
   --train.train_expert_only false \
-  --train.data_parallel_mode fsdp2 \
+  --train.data_parallel_mode "${DATA_PARALLEL_MODE}" \
   --train.data_parallel_replicate_size 1 \
   --train.data_parallel_shard_size "${GPU_COUNT}" \
-  --train.micro_batch_size 1 \
+  --train.micro_batch_size "${MICRO_BATCH_SIZE}" \
   --train.gradient_accumulation_steps "${GRADIENT_ACCUMULATION_STEPS}" \
-  --train.global_batch_size 4 \
+  --train.global_batch_size "${GLOBAL_BATCH_SIZE}" \
   --train.enable_gradient_checkpointing true \
+  --train.enable_fsdp_offload "${ENABLE_FSDP_OFFLOAD}" \
+  --train.enable_activation_offload "${ENABLE_ACTIVATION_OFFLOAD}" \
+  --train.activation_gpu_limit "${ACTIVATION_GPU_LIMIT}" \
   --train.enable_full_shard "${ENABLE_FULL_SHARD}" \
   --train.enable_resume false \
   --train.max_steps "${MAX_STEPS}" \

@@ -18,9 +18,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ROBOTWIN_DISABLE_CUROBO=1 \
     ROBOTWIN_EE_PLANNER=mplib \
     TOKENIZERS_PARALLELISM=false \
-    AITER_USE_SYSTEM_TRITON=1 \
+    AITER_TRITON_ONLY=1 \
     FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
-    FLASH_ATTENTION_USE_SYSTEM_AITER=TRUE \
     ROBOTWIN_ROOT=/RoboTwin \
     LINGBOT_VLA_SOURCE=/RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/source/lingbot-vla-v2 \
     QWEN3VL_PATH=/RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/models/Qwen3-VL-4B-Instruct-config-tokenizer \
@@ -89,8 +88,6 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 
 ENV PYTHONPATH=/opt/aiter
 
-COPY docker/patches/flash-attention-no-gpu-build.patch /tmp/
-
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     git clone https://github.com/ROCm/aiter.git /opt/aiter && \
     git -C /opt/aiter checkout "${AITER_COMMIT}" && \
@@ -100,7 +97,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     git clone https://github.com/ZiguanWang/flash-attention.git /tmp/flash-attention && \
     git -C /tmp/flash-attention checkout "${FLASH_ATTENTION_COMMIT}" && \
     cd /tmp/flash-attention && \
-    git apply /tmp/flash-attention-no-gpu-build.patch && \
+    AITER_TRITON_ONLY=1 \
     GPU_ARCHS="${AITER_GPU_ARCHS}" \
     FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
     FLASH_ATTENTION_USE_SYSTEM_AITER=TRUE \

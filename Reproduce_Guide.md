@@ -192,9 +192,10 @@ robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1-exter
    ```
 
    可在 JupyterLab 中打开该文件，依次完成挂载/GPU 检查、启动 13400 模型服务、
-   `adjust_bottle` 的 10-episode 闭环评测、单卡/双卡/四卡 LoRA 微调、checkpoint
-   合并，以及在同一 13400 端口重新启动合并模型并再次闭环评测。Notebook 中的
-   长时间 GPU 单元不会自动执行，需要用户手动运行。
+   `adjust_bottle` 的 10-episode 闭环评测、可选的单卡/双卡/四卡 50-task ×
+   50-episode 全量评测、单卡/双卡/四卡 LoRA 微调、checkpoint 合并，以及在同一
+   13400 端口重新启动合并模型并再次闭环评测。Notebook 中的长时间 GPU 单元不会
+   自动执行，需要用户手动运行。
 5. 进入实例后先检查当前目录及后台挂载：
 
    ```bash
@@ -220,6 +221,11 @@ robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1-exter
 公开地址没有自动鉴权，不应暴露无认证的管理服务。
 
 ## 3. 环境和镜像内容检查
+
+full 和 external-data 镜像都已经通过 Dockerfile 的 `ENV` 持久设置
+`AITER_TRITON_ONLY=1` 和 `FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE`，因此进入新 shell 后
+不需要手工重复设置。前者避免 AITER 顶层导入当前任务不需要且要求更高 Triton 版本的
+Gluon/AOT 算子，后者使 FlashAttention2 使用 AMD Triton kernel。
 
 ```bash
 pwd
@@ -355,43 +361,55 @@ bash scripts/eval_policy.sh \
 `/workspace/runtime`，结果会持久化到对应的宿主目录；未挂载时仅保存在
 容器内。
 
-测试 `env_cfg/eval/all_tasks.yml` 中列出的全部 50 个任务时，可以复用同一个
-13400 模型服务并顺序执行，避免多个仿真进程同时争用 GPU 显存：
+测试 `env_cfg/eval/all_tasks.yml` 中列出的全部 50 个任务时，使用统一脚本启动
+四个模型服务和四个评测 worker。每张 GPU 同时运行一个模型服务和一个仿真进程；
+任务由动态队列分配，先完成的 GPU 会继续领取下一个任务，减少长短任务不均造成的
+尾部等待。运行前确认 `13400`～`13403` 没有被其他模型服务占用：
 
 ```bash
 cd /RoboTwin
 source /opt/robotwin-env/bin/activate
-mkdir -p /workspace/runtime/outputs/logs
-set -o pipefail
 
-mapfile -t TASKS < <(python - <<'PY'
-import yaml
-
-with open("env_cfg/eval/all_tasks.yml", encoding="utf-8") as file:
-    print(*yaml.safe_load(file)["tasks"], sep="\n")
-PY
-)
-
-for TASK in "${TASKS[@]}"; do
-  echo "===== evaluating ${TASK} ====="
-  bash scripts/eval_policy.sh \
-    --task_name "${TASK}" \
-    --task_config demo_clean \
-    --policy_name LingBot-VLA-v2 \
-    --protocol lingbot_vla_v2 \
-    --host 127.0.0.1 \
-    --port 13400 \
-    --device_id 0 \
-    --seed 0 \
-    --test_num 10 \
-    --expert_check false \
-    --eval_batch false \
-    2>&1 | tee "/workspace/runtime/outputs/logs/eval_${TASK}.log"
-done
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
+  --gpu-count 4 \
+  --episodes 50 \
+  --run-name clean50x50_4gpu \
+  --runtime-dir /workspace/runtime \
+  --resume
 ```
 
-这会执行 50 × 10 个 episode。需要中断后继续时，可以直接把 `TASKS` 替换为尚未
-完成的任务名列表。
+脚本会自动完成以下操作：
+
+- 在 GPU 0～3 上分别启动模型服务，端口为 `13400`～`13403`；
+- 执行全部 50 个 `demo_clean` 任务，每个任务 50 episodes，共 2500 episodes；
+- 将每个任务的日志、耗时、失败记录和完成标记写入
+  `/workspace/runtime/outputs/clean50x50_4gpu`；
+- 通过 `done/<task>.done` 跳过已完成任务，因此同一命令中断后可用 `--resume`
+  继续；
+- 全部完成后检查每个日志的 `Final success rate`，汇总总体成功率，并自动停止脚本
+  启动的模型服务。
+
+同一个脚本也支持单卡和双卡，只需同时修改卡数和运行目录名：
+
+```bash
+# 单卡
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
+  --gpu-count 1 --episodes 50 --run-name clean50x50_1gpu \
+  --runtime-dir /workspace/runtime --resume
+
+# 双卡
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
+  --gpu-count 2 --episodes 50 --run-name clean50x50_2gpu \
+  --runtime-dir /workspace/runtime --resume
+```
+
+根据已经完成的 50 任务 × 50 episodes 运行，时间参考如下：
+
+| GPU 数量 | 时间 |
+|---:|---:|
+| 1 | 约 25 小时 27 分钟 |
+| 2 | 约 13 小时 40 分钟 |
+| 4 | 约 6 小时 50 分钟 |
 
 ## 7. LoRA 训练、合并 checkpoint 并重新推理
 
@@ -536,9 +554,22 @@ bash scripts/eval_policy.sh \
   --eval_batch false
 ```
 
-确认 `adjust_bottle` 正常后，可使用第 6 节的全部任务循环，在同一个 13400 服务上
-评测合并后的 checkpoint。建议将旧模型和合并模型的 `/workspace/runtime/eval_result`
-结果分别备份，避免同任务、同 seed 的结果混淆。
+确认 `adjust_bottle` 正常后，可以对合并后的 LoRA 模型运行完整 50-task ×
+50-episode 评测。该过程四卡约需 6 小时 50 分钟，单卡或双卡会更久；开始前先停止
+上面占用 13400 端口的单卡合并模型服务，因为脚本会自行启动一组模型服务：
+
+```bash
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
+  --gpu-count 4 \
+  --episodes 50 \
+  --model-path "$MERGED" \
+  --run-name lora_100steps_clean50x50_4gpu \
+  --runtime-dir /workspace/runtime \
+  --resume
+```
+
+`--resume` 会读取同一运行目录下的 `done/<task>.done`，跳过已经完成的任务，适合长时间
+评测中断后继续。若要从头独立复测，不要复用已有运行目录，应修改 `--run-name`。
 
 ## 8. 全量 SFT、转换 checkpoint 并重新推理
 
@@ -702,7 +733,22 @@ bash scripts/eval_policy.sh \
   --eval_batch false
 ```
 
-确认单任务正常后，可直接复用第 6 节的全部任务循环。
+确认单任务正常后，可以对转换后的全量 SFT 模型运行完整 50-task × 50-episode
+评测。该过程四卡约需 6 小时 50 分钟，单卡或双卡会更久；开始前先停止上面占用
+13400 端口的单卡全量 SFT 服务：
+
+```bash
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
+  --gpu-count 4 \
+  --episodes 50 \
+  --model-path "$FULL_SFT_MODEL" \
+  --run-name full_sft_100steps_clean50x50_4gpu \
+  --runtime-dir /workspace/runtime \
+  --resume
+```
+
+完整评测耗时很长。`--resume` 只补跑同一 `--run-name` 下尚未生成完成标记的任务；需要
+对相同 checkpoint 重新进行一轮独立评测时，应使用新的 `--run-name`，避免与旧结果混合。
 
 # 第二部分：从干净基础镜像或本机安装
 
@@ -838,7 +884,9 @@ AITER_USE_SYSTEM_TRITON=1 \
   /opt/robotwin-env/bin/python setup.py develop
 ```
 
-然后安装固定的 AMD FlashAttention2 fork。`--no-deps` 和
+然后安装固定的 AMD FlashAttention2 fork。`AITER_TRITON_ONLY=1` 让安装期只使用
+AITER 的 Triton 实现，避免在无 GPU 的镜像构建环境中加载 AITER AOT/C++ 算子并查询
+GPU driver；因此不需要再修改 FlashAttention 的 `setup.py`。`--no-deps` 和
 `FLASH_ATTENTION_USE_SYSTEM_AITER=TRUE` 用于防止 pip 安装第二份 AITER、Triton 或
 PyTorch：
 
@@ -852,18 +900,23 @@ test "$(git -C /opt/flash-attention-source rev-parse HEAD)" = \
 
 cd /opt/flash-attention-source
 PYTHONPATH=/opt/aiter \
+AITER_TRITON_ONLY=1 \
 FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
 FLASH_ATTENTION_USE_SYSTEM_AITER=TRUE \
   /opt/robotwin-env/bin/python -m pip install \
   --no-build-isolation --no-deps .
 ```
 
-每次启动新 shell 时保留 `AITER_USE_SYSTEM_TRITON=1`，然后执行导入检查：
+`AITER_USE_SYSTEM_TRITON=1` 和 `FLASH_ATTENTION_USE_SYSTEM_AITER=TRUE` 仅用于安装。
+`AITER_TRITON_ONLY=1` 还会被 AITER 的 `__init__.py` 在导入时读取：对于本文固定的
+Triton 3.5.1，它能阻止 AITER 继续加载要求 Triton 3.6 以上的 Gluon 模块。因此运行
+LingBot-VLA-v2 推理或训练时，必须同时设置 `AITER_TRITON_ONLY=1` 和
+`FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE`。裸机安装还需让 Python 找到 `/opt/aiter` 中的
+editable AITER 源码，然后执行导入检查：
 
 ```bash
-export AITER_USE_SYSTEM_TRITON=1
+export AITER_TRITON_ONLY=1
 export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
-export FLASH_ATTENTION_USE_SYSTEM_AITER=TRUE
 export PYTHONPATH=/opt/aiter${PYTHONPATH:+:${PYTHONPATH}}
 
 /opt/robotwin-env/bin/python - <<'PY'
@@ -965,7 +1018,14 @@ export HF_LEROBOT_HOME=/RoboTwin/data/lerobot
 export ROBOTWIN_DISABLE_CUROBO=1
 export ROBOTWIN_EE_PLANNER=mplib
 export PYOPENGL_PLATFORM=egl
+export AITER_TRITON_ONLY=1
+export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
+export PYTHONPATH=/opt/aiter${PYTHONPATH:+:${PYTHONPATH}}
 ```
+
+从干净基础镜像或本机安装时，每个用于推理或训练的新 shell 都要设置上面最后三个变量；
+也可以将它们写入所使用 shell 的启动文件。不要在运行期继续设置仅用于安装的
+`AITER_USE_SYSTEM_TRITON` 和 `FLASH_ATTENTION_USE_SYSTEM_AITER`。
 
 下载、解压并删除全部原始 ZIP：
 

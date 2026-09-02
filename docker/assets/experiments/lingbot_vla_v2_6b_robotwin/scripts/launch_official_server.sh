@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd -- "$script_dir/.." && pwd)
 source_root="$root/source/lingbot-vla-v2"
-python_bin=${LINGBOT_VLA_PYTHON:-"$root/env/.venv/bin/python"}
+python_bin=${LINGBOT_VLA_PYTHON:-/opt/robotwin-env/bin/python}
 default_model_path="$root/models/robbyant_lingbot-vla-v2-6b-robotwin/checkpoints/global_step_50000/hf_ckpt"
 qwen_path="$root/models/Qwen3-VL-4B-Instruct-config-tokenizer"
 
@@ -21,7 +21,6 @@ unset ROCR_VISIBLE_DEVICES
 unset CUDA_VISIBLE_DEVICES
 export QWEN3VL_PATH="$qwen_path"
 export SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0
-export PYTHONPATH="$source_root${PYTHONPATH:+:$PYTHONPATH}"
 
 cd "$source_root"
 exec "$python_bin" -m deploy.lingbot_vla_v2_policy \
@@ -31,4 +30,3 @@ exec "$python_bin" -m deploy.lingbot_vla_v2_policy \
   --use_fp32 False \
   --use_compile "$use_compile" \
   --port "$port" >> "$log_file" 2>&1
-
