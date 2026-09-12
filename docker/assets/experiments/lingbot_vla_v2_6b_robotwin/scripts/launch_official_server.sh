@@ -5,7 +5,9 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd -- "$script_dir/.." && pwd)
 source_root="$root/source/lingbot-vla-v2"
 python_bin=${LINGBOT_VLA_PYTHON:-/opt/robotwin-env/bin/python}
-default_model_path="$root/models/robbyant_lingbot-vla-v2-6b-robotwin/checkpoints/global_step_50000/hf_ckpt"
+# Default to the official LingBot-VLA-v2 base checkpoint. RobotWin
+# post-training checkpoints must be passed explicitly with argument 5.
+default_model_path="$root/models/robbyant_lingbot-vla-v2-6b"
 qwen_path="$root/models/Qwen3-VL-4B-Instruct-config-tokenizer"
 
 hip_id=${1:?usage: launch_official_server.sh HIP_ID PORT LOG_FILE [USE_COMPILE]}

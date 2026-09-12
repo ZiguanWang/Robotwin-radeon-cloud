@@ -30,8 +30,9 @@ ARG LINGBOT_VLA_COMMIT=951475ae1b1d87553e7dc47c97b53a3d695c0d13
 ARG AITER_COMMIT=9bab8388c35936814a659b4ebd245c491e1b940a
 ARG FLASH_ATTENTION_COMMIT=bc76302fbb24c0158207978930db030ca1eca5ca
 ARG AITER_GPU_ARCHS=gfx1100;gfx1201
-ARG LINGBOT_MODEL_REVISION=0451855729ec904f970600e0aec8b84661423afe
+ARG LINGBOT_MODEL_REVISION=11c703bf6a5c1f45b3b69168482da11fdbba53d7
 ARG QWEN_CONFIG_REVISION=ebb281ec70b05090aa6165b016eac8ec08e71b17
+ARG MOGE_MODEL_REVISION=ca5f0e07ff01d3e5a364c1d954ed12ee1814b368
 ARG ROBOTWIN_DATA_REVISION=a967b852afa21a9cbf19a198f7e653109042e87c
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -83,6 +84,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 
 RUN /opt/robotwin-env/bin/python - <<'PY'
 import torch, torchvision, numpy, sapien, mplib, lerobot
+import pipeline, utils3d
 assert torch.__file__.startswith('/opt/venv/'), torch.__file__
 assert torch.version.hip is not None
 assert numpy.__version__ == '1.26.4'
@@ -100,13 +102,18 @@ ENV PYTHONPATH=/opt/aiter
 # Build the tested AMD FlashAttention2 stack without allowing either project
 # to replace the ROCm image's PyTorch-matched Triton package.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    git clone https://github.com/ROCm/aiter.git /opt/aiter && \
-    git -C /opt/aiter checkout "${AITER_COMMIT}" && \
+    git init /opt/aiter && \
+    git -C /opt/aiter remote add origin https://github.com/ROCm/aiter.git && \
+    git -C /opt/aiter fetch --depth 1 origin "${AITER_COMMIT}" && \
+    git -C /opt/aiter checkout FETCH_HEAD && \
     cd /opt/aiter && \
+    sed -i '/flydsl==0.1.9.dev599/d' pyproject.toml && \
     GPU_ARCHS="${AITER_GPU_ARCHS}" AITER_USE_SYSTEM_TRITON=1 \
         /opt/robotwin-env/bin/python setup.py develop && \
-    git clone https://github.com/ZiguanWang/flash-attention.git /tmp/flash-attention && \
-    git -C /tmp/flash-attention checkout "${FLASH_ATTENTION_COMMIT}" && \
+    git init /tmp/flash-attention && \
+    git -C /tmp/flash-attention remote add origin https://github.com/ZiguanWang/flash-attention.git && \
+    git -C /tmp/flash-attention fetch --depth 1 origin "${FLASH_ATTENTION_COMMIT}" && \
+    git -C /tmp/flash-attention checkout FETCH_HEAD && \
     cd /tmp/flash-attention && \
     AITER_TRITON_ONLY=1 \
     GPU_ARCHS="${AITER_GPU_ARCHS}" \
@@ -119,6 +126,8 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 RUN /opt/robotwin-env/bin/python - <<'PY'
 from importlib.metadata import version
 
+import aiter
+import flash_attn
 import triton
 
 assert version("flash-attn") == "2.8.4"
@@ -136,7 +145,7 @@ RUN git clone --recurse-submodules https://github.com/RoboTwin-Platform/RoboTwin
     git -C /RoboTwin checkout "${ROBOTWIN_COMMIT}" && \
     git -C /RoboTwin submodule update --init --recursive && \
     test "$(git -C /RoboTwin rev-parse HEAD)" = "${ROBOTWIN_COMMIT}" && \
-    git -C /RoboTwin apply /tmp/robotwin-patches/robotwin-rocm.patch && \
+    git -C /RoboTwin apply /tmp/robotwin-patches/robotwin-rocm-reproduction.patch && \
     git -C /RoboTwin/XPolicyLab apply /tmp/robotwin-patches/xpolicylab-lerobot-v30.patch && \
     mkdir -p /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/source && \
     git clone https://github.com/robbyant/lingbot-vla-v2.git \
@@ -173,19 +182,28 @@ RUN --mount=type=cache,id=robotwin-models,target=/tmp/robotwin-model-cache,shari
     CACHE_ROOT=/tmp/robotwin-model-cache && \
     mkdir -p "${MODEL_ROOT}" && \
     /opt/robotwin-env/bin/huggingface-cli download \
-        robbyant/lingbot-vla-v2-6b-robotwin \
+        robbyant/lingbot-vla-v2-6b \
         --revision "${LINGBOT_MODEL_REVISION}" \
-        --local-dir "${CACHE_ROOT}/robbyant_lingbot-vla-v2-6b-robotwin" && \
+        --local-dir "${CACHE_ROOT}/robbyant_lingbot-vla-v2-6b" && \
     /opt/robotwin-env/bin/huggingface-cli download Qwen/Qwen3-VL-4B-Instruct \
         --revision "${QWEN_CONFIG_REVISION}" \
         --include '*.json' '*.txt' '*.jinja' merges.txt vocab.json \
         --local-dir "${CACHE_ROOT}/Qwen3-VL-4B-Instruct-config-tokenizer" && \
-    cp -a "${CACHE_ROOT}/robbyant_lingbot-vla-v2-6b-robotwin" "${MODEL_ROOT}/" && \
+    /opt/robotwin-env/bin/huggingface-cli download Ruicheng/moge-2-vitb-normal \
+        --revision "${MOGE_MODEL_REVISION}" \
+        --local-dir "${CACHE_ROOT}/moge-2-vitb-normal" && \
+    cp -a "${CACHE_ROOT}/robbyant_lingbot-vla-v2-6b" "${MODEL_ROOT}/" && \
     cp -a "${CACHE_ROOT}/Qwen3-VL-4B-Instruct-config-tokenizer" "${MODEL_ROOT}/" && \
-    rm -rf "${MODEL_ROOT}/robbyant_lingbot-vla-v2-6b-robotwin/.cache" \
-        "${MODEL_ROOT}/Qwen3-VL-4B-Instruct-config-tokenizer/.cache" && \
-    test -f "${MODEL_ROOT}/robbyant_lingbot-vla-v2-6b-robotwin/checkpoints/global_step_50000/hf_ckpt/model.safetensors.index.json" && \
-    test "$(find "${MODEL_ROOT}/robbyant_lingbot-vla-v2-6b-robotwin/checkpoints/global_step_50000/hf_ckpt" -name 'model-*.safetensors' | wc -l)" -eq 6
+    cp -a "${CACHE_ROOT}/moge-2-vitb-normal" "${MODEL_ROOT}/" && \
+    rm -rf "${MODEL_ROOT}/robbyant_lingbot-vla-v2-6b/.cache" \
+        "${MODEL_ROOT}/Qwen3-VL-4B-Instruct-config-tokenizer/.cache" \
+        "${MODEL_ROOT}/moge-2-vitb-normal/.cache" && \
+    test -f "${MODEL_ROOT}/robbyant_lingbot-vla-v2-6b/model.safetensors.index.json" && \
+    test -f "${MODEL_ROOT}/robbyant_lingbot-vla-v2-6b/depth/model.pt" && \
+    test -f "${MODEL_ROOT}/robbyant_lingbot-vla-v2-6b/dino_video/teacher_step_10000.pth" && \
+    test -f "${MODEL_ROOT}/robbyant_lingbot-vla-v2-6b/dino_video/config.yaml" && \
+    test -f "${MODEL_ROOT}/moge-2-vitb-normal/model.pt" && \
+    test "$(find "${MODEL_ROOT}/robbyant_lingbot-vla-v2-6b" -maxdepth 1 -name 'model-*.safetensors' | wc -l)" -eq 6
 
 # Bake all 50 unpacked demo_clean tasks into the image. Source ZIPs live only
 # in a BuildKit cache and are retained there for later rebuilds, so the 23.4 GB

@@ -9,14 +9,15 @@
 | RoboTwin | `266f3aadf505a4f7fe9af0faa41a20f5f47cd123` |
 | XPolicyLab | `c37109c500be67d0dea6b36bf7337bbd26e763cd` |
 | LingBot-VLA-v2 | `951475ae1b1d87553e7dc47c97b53a3d695c0d13` |
-| 官方模型 revision | `0451855729ec904f970600e0aec8b84661423afe` |
+| 官方基础模型 revision | `11c703bf6a5c1f45b3b69168482da11fdbba53d7` |
 | Qwen 配置 revision | `ebb281ec70b05090aa6165b016eac8ec08e71b17` |
+| MoGe-2 ViT-B normal revision | `ca5f0e07ff01d3e5a364c1d954ed12ee1814b368` |
 | RoboTwin2.0 数据 revision | `a967b852afa21a9cbf19a198f7e653109042e87c` |
 | PyTorch / ROCm | 2.9.1 / 7.2.1 |
 | LeRobot | 0.6.0 |
 
 AMD 环境关闭 CuRobo，使用 MPLib 做末端位姿规划。闭环结果应注明
-`ROCm + MPLib + expert_check=false`，不要直接与 CUDA/CuRobo 结果比较。
+`ROCm + MPLib + expert_check=true`，不要直接与 CUDA/CuRobo 结果比较。
 
 # 第一部分：使用构建好的 Docker 镜像
 
@@ -152,18 +153,20 @@ docker exec -it robotwin-lingbot-vla-v2 bash
 ### 2.2 Radeon Cloud
 
 当前需要在 [Radeon Cloud Global](https://radeon-global.anruicloud.com/) 上验证。云端
-操作参考 [Radeon Cloud User Guide](https://github.com/AMD-DEV-CONTEST/Radeon-hackathon-2026-07/tree/main/Radeon-Cloud-User%20Guide)。
-Radeon Cloud 使用本项目构建并上传到镜像仓库的 **external-data 镜像**，不是 full
-镜像，也不是仅启动原始 ROCm PyTorch 基础镜像：
+操作参考 [Radeon Cloud User Guide](https://github.com/AMD-DEV-CONTEST/Embodied-AI-Challenge-AMD-Platform-2026-09/blob/main/Radeon-Cloud-User-Guide/README.md)。
+Radeon Cloud 使用本项目构建并上传到镜像仓库的 **external-data 镜像**：
 
 ```text
 robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1-external-data
 ```
 
-1. 登录 Radeon Cloud，进入 **Profile → My Templates → Add Template**。
-2. **Container Image** 填写上述 external-data 镜像在云端镜像仓库中的完整地址。
-   Add Template 最后的 **Model Directory** 选项必须选择并拉取 **Devzone**；如果
-   没有选择 Devzone，实例内不会挂载 external-data 镜像所需的数据。
+1. 登录 Radeon Cloud。如果本地还没有 SSH 密钥，先执行
+   `ssh-keygen -t ed25519` 生成密钥，然后在平台中点击 **Settings → New SSH Key**，
+   粘贴 `~/.ssh/id_ed25519.pub` 的内容并保存。只能上传 `.pub` 公钥，不要上传私钥。
+2. 在实例配置页面点击 **Customize**，根据需要选择 **4 GPUs** 或 **8 GPUs**；在
+   **Image** 中选择 **robotwin**，在 **Resource Pool** 中选择本次比赛对应的资源池，
+   最后在 **Mount a model** 中选择 **Devzone**。如果没有选择 Devzone，实例内不会
+   挂载 external-data 镜像所需的数据。
 3. 选择 **Devzone** 后，平台后台会把相应内容挂载到 `/models`，用户不需要手动
    挂载。external-data
    所需内容位于其中的 `/models/robotwin-persistent`，目录结构为：
@@ -175,10 +178,17 @@ robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1-exter
    └── models/
    ```
 
-4. Launch 后可以使用 JupyterLab Terminal；如果模板提前启用了
-   **SSH Access (advanced)**，并在 Profile 中保存了公钥，也可以使用页面提供的
-   host、port 和 user 通过 SSH 登录。Radeon Cloud 的 JupyterLab 文件浏览器默认
-   打开 `/workspace`，因此可以先打开 Terminal（命令行终端）并执行：
+4. 配置完成并启动实例，等待页面显示 **Your workspace is ready**。点击
+   **Open Notebook** 可以进入 JupyterLab；第一步已经添加公钥后，实例显示
+   **Instance running** 时也可以直接复制页面 SSH 窗口中的 host、port 和 user，
+   在本地终端登录：
+
+   ```bash
+   ssh <user>@<host> -p <port>
+   ```
+
+   Radeon Cloud 的 JupyterLab 文件浏览器默认打开 `/workspace`，因此可以先打开
+   Terminal（命令行终端）并执行：
 
    ```bash
    ln -sfn /RoboTwin /workspace/RoboTwin
@@ -191,11 +201,12 @@ robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1-exter
    /RoboTwin/RoboTwin_ROCm_Reproduction.ipynb
    ```
 
-   可在 JupyterLab 中打开该文件，依次完成挂载/GPU 检查、启动 13400 模型服务、
-   `adjust_bottle` 的 10-episode 闭环评测、可选的单卡/双卡/四卡 50-task ×
-   50-episode 全量评测、单卡/双卡/四卡 LoRA 微调、checkpoint 合并，以及在同一
-   13400 端口重新启动合并模型并再次闭环评测。Notebook 中的长时间 GPU 单元不会
-   自动执行，需要用户手动运行。
+   可在 JupyterLab 中打开该文件，依次完成挂载/GPU 检查、启动端口号为 13400 的模型服务、
+   `adjust_bottle` 的 10-episode 闭环评测，以及可选的四卡/八卡 clean + randomized
+   100-task × 10-episode 全量评测。训练流程包括四卡/八卡 LoRA 微调、LoRA checkpoint 合并、
+   四卡/八卡全参数 SFT、全参数 DCP checkpoint 合并，以及分别在同一 13400 端口
+   重新启动合并模型并再次进行闭环评测。Notebook 中的长时间 GPU 单元不会自动
+   执行，需要用户根据实例 GPU 数量确认配置后手动运行。
 5. 进入实例后先检查当前目录及后台挂载：
 
    ```bash
@@ -215,10 +226,6 @@ robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1-exter
    ls -l /dev/kfd /dev/dri
    rocminfo | head
    ```
-
-模型 server 与评测 client 位于同一云端实例时继续使用 `127.0.0.1:13400`。需要
-从外部访问 WebSocket 时，可以按照云端指南安装 `rc-tunnel` 并暴露 server 端口；
-公开地址没有自动鉴权，不应暴露无认证的管理服务。
 
 ## 3. 环境和镜像内容检查
 
@@ -278,6 +285,10 @@ checkpoint 和日志也写入 `/workspace/runtime`。本地启动容器时，只
 
 ## 5. 官方模型推理
 
+默认模型是官方 `robbyant/lingbot-vla-v2-6b` 基础 checkpoint。默认 server、默认
+闭环评测和训练初始化都使用该基础 checkpoint；RoboTwin 后训练 checkpoint 不作为默认
+模型，只有在对应的训练后验证命令中显式传入时才会使用。
+
 终端 1：
 
 ```bash
@@ -334,7 +345,8 @@ python scripts/eval_policy_xpolicylab.py \
   --device_id 0 \
   --seed 0 \
   --test_num 10 \
-  --expert_check false \
+  --expert_check true \
+  --accept_expert_info_on_failure true \
   --eval_batch false
 ```
 
@@ -351,7 +363,8 @@ bash scripts/eval_policy.sh \
   --device_id 0 \
   --seed 0 \
   --test_num 10 \
-  --expert_check false \
+  --expert_check true \
+  --accept_expert_info_on_failure true \
   --eval_batch false
 ```
 
@@ -361,10 +374,13 @@ bash scripts/eval_policy.sh \
 `/workspace/runtime`，结果会持久化到对应的宿主目录；未挂载时仅保存在
 容器内。
 
-测试 `env_cfg/eval/all_tasks.yml` 中列出的全部 50 个任务时，使用统一脚本启动
-四个模型服务和四个评测 worker。每张 GPU 同时运行一个模型服务和一个仿真进程；
+测试 `env_cfg/eval/all_tasks.yml` 中列出的 clean 和 randomized 两组任务时，使用统一脚本启动
+四个或八个模型服务和对应数量的评测 worker。每张 GPU 同时运行一个模型服务和一个仿真进程；
 任务由动态队列分配，先完成的 GPU 会继续领取下一个任务，减少长短任务不均造成的
-尾部等待。运行前确认 `13400`～`13403` 没有被其他模型服务占用：
+尾部等待。四卡运行前确认 `13400`～`13403` 没有被其他模型服务占用，八卡运行前确认
+`13400`～`13407` 没有被其他模型服务占用。
+
+四卡运行：
 
 ```bash
 cd /RoboTwin
@@ -372,8 +388,10 @@ source /opt/robotwin-env/bin/activate
 
 python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
   --gpu-count 4 \
-  --episodes 50 \
-  --run-name clean50x50_4gpu \
+  --episodes 10 \
+  --expert-check \
+  --accept-expert-info-on-failure \
+  --run-name both100x10_4gpu \
   --runtime-dir /workspace/runtime \
   --resume
 ```
@@ -381,79 +399,49 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
 脚本会自动完成以下操作：
 
 - 在 GPU 0～3 上分别启动模型服务，端口为 `13400`～`13403`；
-- 执行全部 50 个 `demo_clean` 任务，每个任务 50 episodes，共 2500 episodes；
+- 执行 50 个 `demo_clean` 和 50 个 `demo_randomized` 任务，每个任务 10 episodes，共 1000 episodes；
 - 将每个任务的日志、耗时、失败记录和完成标记写入
-  `/workspace/runtime/outputs/clean50x50_4gpu`；
-- 通过 `done/<task>.done` 跳过已完成任务，因此同一命令中断后可用 `--resume`
+  `/workspace/runtime/outputs/both100x10_4gpu`；
+- 通过 `done/<task_config>__<task>.done` 跳过已完成任务，因此同一命令中断后可用 `--resume`
   继续；
 - 全部完成后检查每个日志的 `Final success rate`，汇总总体成功率，并自动停止脚本
   启动的模型服务。
 
-同一个脚本也支持单卡和双卡，只需同时修改卡数和运行目录名：
+八卡运行时只需修改 GPU 数量和运行目录名：
 
 ```bash
-# 单卡
 python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
-  --gpu-count 1 --episodes 50 --run-name clean50x50_1gpu \
-  --runtime-dir /workspace/runtime --resume
-
-# 双卡
-python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
-  --gpu-count 2 --episodes 50 --run-name clean50x50_2gpu \
-  --runtime-dir /workspace/runtime --resume
+  --gpu-count 8 \
+  --episodes 10 \
+  --expert-check \
+  --accept-expert-info-on-failure \
+  --run-name both100x10_8gpu \
+  --runtime-dir /workspace/runtime \
+  --resume
 ```
 
-根据已经完成的 50 任务 × 50 episodes 运行，时间参考如下：
+实测 clean、randomized 以及四卡/八卡合计墙钟时间如下：
 
-| GPU 数量 | 时间 |
-|---:|---:|
-| 1 | 约 25 小时 27 分钟 |
-| 2 | 约 13 小时 40 分钟 |
-| 4 | 约 6 小时 50 分钟 |
+| 机器 | 配置 | 完成度 | 墙钟时间 |
+|---|---|---:|---:|
+| 4× W7900 | clean | 50 tasks / 500 episodes | 8小时26分41秒 |
+| 4× W7900 | randomized | 50 tasks / 500 episodes | 10小时29分07秒 |
+| 4× W7900 | 合计 | 100 tasks / 1000 episodes | 18小时55分48秒 |
+| 8× W7900 | clean | 50 tasks / 500 episodes | 6小时34分23秒 |
+| 8× W7900 | randomized | 50 tasks / 500 episodes | 8小时37分58秒 |
+| 8× W7900 | 合计 | 100 tasks / 1000 episodes | 15小时12分21秒 |
 
 ## 7. LoRA 训练、合并 checkpoint 并重新推理
 
 ### 7.1 LoRA 训练
 
-默认使用单卡训练：
+四卡训练：
 
 ```bash
 cd /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/source/lingbot-vla-v2
 source /opt/robotwin-env/bin/activate
 mkdir -p /workspace/runtime/outputs/logs
 
-export HIP_VISIBLE_DEVICES=0
-unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
-
-python -m torch.distributed.run \
-  --standalone \
-  --nproc-per-node=1 \
-  -m tasks.vla.train_lingbotvla \
-  /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/training/reproduction_100steps/lingbotvla_cli.yaml \
-  --train.data_parallel_shard_size 1 \
-  --train.gradient_accumulation_steps 4 \
-  2>&1 | tee /workspace/runtime/outputs/logs/lora_100steps_1gpu.log
-```
-
-双卡训练只需把可见 GPU 和进程数改为 2：
-
-```bash
-export HIP_VISIBLE_DEVICES=0,1
-unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
-
-python -m torch.distributed.run \
-  --standalone \
-  --nproc-per-node=2 \
-  -m tasks.vla.train_lingbotvla \
-  /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/training/reproduction_100steps/lingbotvla_cli.yaml \
-  --train.data_parallel_shard_size 2 \
-  --train.gradient_accumulation_steps 2 \
-  2>&1 | tee /workspace/runtime/outputs/logs/lora_100steps_2gpu.log
-```
-
-四卡训练：
-
-```bash
 export HIP_VISIBLE_DEVICES=0,1,2,3
 unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
 
@@ -464,14 +452,33 @@ python -m torch.distributed.run \
   /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/training/reproduction_100steps/lingbotvla_cli.yaml \
   --train.data_parallel_shard_size 4 \
   --train.gradient_accumulation_steps 1 \
+  --train.global_batch_size 4 \
   2>&1 | tee /workspace/runtime/outputs/logs/lora_100steps_4gpu.log
+```
+
+八卡训练：
+
+```bash
+export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
+
+python -m torch.distributed.run \
+  --standalone \
+  --nproc-per-node=8 \
+  -m tasks.vla.train_lingbotvla \
+  /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/training/reproduction_100steps/lingbotvla_cli.yaml \
+  --train.data_parallel_shard_size 8 \
+  --train.gradient_accumulation_steps 1 \
+  --train.global_batch_size 8 \
+  2>&1 | tee /workspace/runtime/outputs/logs/lora_100steps_8gpu.log
 ```
 
 不要直接调用 PATH 中的 `torchrun`，它可能绑定错误的 Python。多卡训练使用
 PyTorch Distributed Data Parallel；`HIP_VISIBLE_DEVICES` 中的 GPU 数量必须与
-`--nproc-per-node` 一致。这里保持有效全局 batch size 为 4，因此还必须满足
+`--nproc-per-node` 一致。这里四卡保持有效全局 batch size 为 4，八卡保持有效全局
+batch size 为 8，因此还必须满足
 `global_batch_size = micro_batch_size × data_parallel_size × gradient_accumulation_steps`：
-单卡、双卡、四卡的梯度累积步数分别是 4、2、1。训练输出位于：
+四卡、八卡的梯度累积步数按对应的 global batch 和数据并行规模设置。训练输出位于：
 
 ```text
 /workspace/runtime/outputs/reproduction_100steps
@@ -484,9 +491,6 @@ PyTorch Distributed Data Parallel；`HIP_VISIBLE_DEVICES` 中的 GPU 数量必�
 - `train.attention_implementation: flex_cached`：用于 VLM 与 action expert 的联合注意力；
   该路径使用自定义二维 block mask，不能设置为 `flash_attention_2`，否则会报
   `Invalid attention implementation`。
-
-旧版数据清单中如果仍含 `/workspace/RoboTwin/data/...`，镜像内的数据加载兼容补丁会在
-对应 `/RoboTwin/data/...` 目录确实存在时自动映射，无需修改持久化数据文件。
 
 YAML 中的 `train.max_steps: 100` 只用于验证数据读取、前后向、保存和合并链路，
 通常不足以获得有代表性的微调效果。Notebook 可以直接修改：
@@ -518,7 +522,7 @@ MERGED=/workspace/runtime/outputs/reproduction_100steps/merged_checkpoint/global
 python experiments/lingbot_vla_v2_6b_robotwin/scripts/merge_lora_dcp.py \
   --checkpoint /workspace/runtime/outputs/reproduction_100steps/checkpoints/global_step_100 \
   --training-output /workspace/runtime/outputs/reproduction_100steps \
-  --base-model /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/models/robbyant_lingbot-vla-v2-6b-robotwin/checkpoints/global_step_50000/hf_ckpt \
+  --base-model /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/models/robbyant_lingbot-vla-v2-6b \
   --output "$MERGED" \
   --rank 8 \
   --alpha 16
@@ -550,20 +554,37 @@ bash scripts/eval_policy.sh \
   --device_id 0 \
   --seed 0 \
   --test_num 10 \
-  --expert_check false \
+  --expert_check true \
+  --accept_expert_info_on_failure true \
   --eval_batch false
 ```
 
-确认 `adjust_bottle` 正常后，可以对合并后的 LoRA 模型运行完整 50-task ×
-50-episode 评测。该过程四卡约需 6 小时 50 分钟，单卡或双卡会更久；开始前先停止
-上面占用 13400 端口的单卡合并模型服务，因为脚本会自行启动一组模型服务：
+确认 `adjust_bottle` 正常后，可以对合并后的 LoRA 模型运行完整 100-task ×
+10-episode 评测；开始前先停止上面占用 13400 端口的合并模型服务，因为脚本会自行启动
+一组 4/8 卡模型服务。四卡运行：
 
 ```bash
 python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
   --gpu-count 4 \
-  --episodes 50 \
+  --episodes 10 \
+  --expert-check \
+  --accept-expert-info-on-failure \
   --model-path "$MERGED" \
-  --run-name lora_100steps_clean50x50_4gpu \
+  --run-name lora_100steps_both100x10_4gpu \
+  --runtime-dir /workspace/runtime \
+  --resume
+```
+
+八卡运行：
+
+```bash
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
+  --gpu-count 8 \
+  --episodes 10 \
+  --expert-check \
+  --accept-expert-info-on-failure \
+  --model-path "$MERGED" \
+  --run-name lora_100steps_both100x10_8gpu \
   --runtime-dir /workspace/runtime \
   --resume
 ```
@@ -573,88 +594,144 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
 
 ## 8. 全量 SFT、转换 checkpoint 并重新推理
 
-这是与第 7 节 LoRA 相互独立的训练流程。全量 SFT 会更新模型的全部可训练参数，不能使用
-LoRA 的 `merge_lora_dcp.py`。先停止占用 GPU 的模型 server，然后运行 1 step smoke test：
+这是与第 7 节 LoRA 相互独立的训练流程。默认训练启用完整 depth/video teacher；不带
+teacher 的普通 SFT 可以运行，但会缺少对应的深度/视频监督，效果较差，不推荐用于正式复现。
+先停止占用 GPU 的模型 server，然后运行统一训练入口：
 
-### 8.1 全量 SFT 训练
+### 8.1 默认：完整 depth/video teacher 训练
 
-脚本支持 1、2、4 卡，默认使用 4 卡。与 LoRA 训练相同，有效 global batch 始终保持为 4：
+官方基础 checkpoint 已包含 LingBot-Depth 和 DINO-VIDEO，持久模型目录还必须有单独下载的
+`moge-2-vitb-normal/model.pt`。以下命令启用 current/future depth 与 DINO-video teacher，
+完成若干真实 forward/backward/optimizer steps 后由 timeout 停止。默认使用 AdamW，micro
+batch 16 与容量表一致：
 
-| GPU 数 | `data_parallel_shard_size` | `gradient_accumulation_steps` | `global_batch_size` |
-|---:|---:|---:|---:|
-| 1 | 1 | 4 | 4 |
-| 2 | 2 | 2 | 4 |
-| 4（默认） | 4 | 1 | 4 |
+| GPU 数 | `data_parallel_shard_size` | `micro_batch_size` | `gradient_accumulation_steps` | `global_batch_size` |
+|---:|---:|---:|---:|---:|
+| 4（默认） | 4 | 16 | 4 | 256 |
+| 8 | 8 | 16 | 2 | 256 |
 
-单卡 1-step smoke test：
-
-```bash
-cd /RoboTwin
-GPU_COUNT=1 MAX_STEPS=1 SAVE_STEPS=1 \
-OUTPUT_DIR=/workspace/runtime/outputs/full_sft_1gpu_1step \
-bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
-```
-
-双卡 1-step smoke test：
-
-```bash
-cd /RoboTwin
-GPU_COUNT=2 MAX_STEPS=1 SAVE_STEPS=1 \
-OUTPUT_DIR=/workspace/runtime/outputs/full_sft_2gpu_1step \
-bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
-```
-
-双卡 48 GB 可以优先按这条命令评估，建议保持 `enable_full_shard=true` 和 gradient
-checkpointing，并在另一个终端持续观察两张卡的显存。卡数减少后，每张卡承担的参数、梯度
-和 optimizer 分片都会增大，因此不能从四卡结果直接保证双卡一定不 OOM；只有 1 step 完整
-通过 forward、backward 和 optimizer step，才能继续增加训练步数。
-
-默认四卡 1-step smoke test：
+四卡运行：
 
 ```bash
 cd /RoboTwin
 
-MAX_STEPS=1 \
-SAVE_STEPS=1 \
-OUTPUT_DIR=/workspace/runtime/outputs/full_sft_4gpu_1step \
+TEACHER_MODE=full \
+GPU_COUNT=4 \
+OPTIMIZER=adamw \
+MICRO_BATCH_SIZE=16 \
+GLOBAL_BATCH_SIZE=256 \
+TIMEOUT_SECONDS=300 \
+MAX_STEPS=100 SAVE_STEPS=100 \
+OUTPUT_DIR=/workspace/runtime/outputs/teacher_full_4gpu_100steps \
 bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
 ```
 
-脚本使用以下关键参数，其中 shard size 和梯度累积由 `GPU_COUNT` 自动计算：
+八卡运行：
+
+```bash
+cd /RoboTwin
+
+TEACHER_MODE=full \
+GPU_COUNT=8 \
+OPTIMIZER=adamw \
+MICRO_BATCH_SIZE=16 \
+GLOBAL_BATCH_SIZE=256 \
+TIMEOUT_SECONDS=300 \
+MAX_STEPS=100 SAVE_STEPS=100 \
+OUTPUT_DIR=/workspace/runtime/outputs/teacher_full_8gpu_100steps \
+bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
+```
+
+`TIMEOUT_SECONDS` 只控制 smoke test 的最长运行时间；正式训练时将其设为 `0`，并根据需要
+调整训练步数、保存步数和输出目录。用户可以根据训练需求自行调整 `MAX_STEPS` 和
+`SAVE_STEPS`；通常将两者设为相同值，需要更频繁保存 checkpoint 时可以单独减小
+`SAVE_STEPS`。
+
+四卡和八卡的完整 teacher 容量测试均验证到 micro batch 16，故默认使用四卡
+`16 × 4 × 4 = 256`、八卡 `16 × 8 × 2 = 256`。脚本使用以下关键参数，其中 shard size
+和梯度累积由 `GPU_COUNT` 自动计算：
 
 ```text
 use_lora=false
 data_parallel_mode=fsdp2
 data_parallel_replicate_size=1
 data_parallel_shard_size=GPU_COUNT
-micro_batch_size=1
-gradient_accumulation_steps=4/GPU_COUNT
-global_batch_size=4
+micro_batch_size=16              # GPU_COUNT=4 or 8
+gradient_accumulation_steps=256/(GPU_COUNT*micro_batch_size)
+global_batch_size=256
 enable_gradient_checkpointing=true
 enable_full_shard=true
 ```
 
-确认四个 rank 都完成 forward、backward、optimizer step 和 DCP 保存后，再运行所需步数：
+完整 depth/video teacher 在四张或八张 W7900（每张 48 GiB）上的容量测试如下。测试启用
+gradient checkpointing 和 FSDP2 full-shard；稳态 step time 取第 2、3 个 optimizer step
+的平均值，峰值显存按每秒采样覆盖模型加载、forward、backward 和 optimizer update，取各卡
+中的最高值。这里的测试 sweep 用于确认容量边界；正式默认配置仍为 micro batch 16、
+global batch 256。
+
+| 平台 | 每卡 micro batch | 梯度累积 | 稳态 step time | 峰值显存/卡 | 结果 |
+|---|---:|---:|---:|---:|---|
+| 4× W7900 48 GiB | 1 | 64 | 245.580 秒 | 40.329–40.375 GiB | 通过 |
+| 4× W7900 48 GiB | 2 | 32 | 136.748 秒 | 41.337–41.349 GiB | 通过 |
+| 4× W7900 48 GiB | 4 | 16 | 76.010 秒 | 43.509–43.521 GiB | 通过 |
+| 4× W7900 48 GiB | 8 | 8 | 54.031 秒 | 47.729–47.761 GiB | 通过，余量有限 |
+| 4× W7900 48 GiB | 16 | 4 | 41.392 秒 | 47.890–47.975 GiB | 通过，接近显存上限 |
+| 4× W7900 48 GiB | 32 | 2 | — | 47.648–47.956 GiB，仅余 62–286 MiB | HIP OOM |
+| 8× W7900 48 GiB | 1 | 32 | 143.665 秒 | 27.520–27.558 GiB | 完成计算 |
+| 8× W7900 48 GiB | 2 | 16 | 80.319 秒 | 27.818–27.832 GiB | 通过 |
+| 8× W7900 48 GiB | 4 | 8 | 47.055 秒 | 29.498–29.523 GiB | 通过 |
+| 8× W7900 48 GiB | 8 | 4 | 27.108 秒 | 33.004–33.386 GiB | 通过 |
+| 8× W7900 48 GiB | 16 | 2 | 24.682 秒 | 41.344–41.356 GiB | 通过 |
+| 8× W7900 48 GiB | 32 | 1 | — | 47.878–47.947 GiB，仅余约 0.12–0.14 GiB | HIP OOM |
+
+显存区间表示对应 GPU 数量的峰值显存最小值到最大值。稳态 step time 取 sweep 中第 2、3
+个 optimizer step 的平均值。
+上述数据是容量测试记录，不改变四卡和八卡默认训练配置。
+
+默认四卡/八卡 AdamW 的全量 DCP checkpoint 目录约为 70 GB 级别。这是所有 rank 写出的
+分片文件合计，不是每张卡各写对应大小。checkpoint 同时保存训练所需的完整模型参数和
+optimizer 状态；AdamW 通常为每个参数保存一阶、二阶矩，因此 optimizer 部分往往比模型
+权重本身更大。此外还有学习率调度器、随机数和 dataloader 状态。改变 GPU 数主要改变分片
+文件的数量和单片大小，不会按比例降低整个 checkpoint 的总容量。应提前检查
+`/workspace/runtime` 的可用空间；如果只需要部署，可以在转换出 Hugging Face checkpoint
+并确认可加载后删除不再需要的 DCP。
+
+### 8.2 可选：不带 teacher 的全量 SFT 训练
+
+普通 SFT 入口支持 4 或 8 卡，但不启用 teacher，效果不如默认的完整 teacher 训练，不推荐作为
+正式复现配置。命令格式与 8.1 保持一致，只将 `TEACHER_MODE` 改为 `none`。
+
+四卡运行：
 
 ```bash
+cd /RoboTwin
+TEACHER_MODE=none \
 GPU_COUNT=4 \
-MAX_STEPS=100 \
-SAVE_STEPS=100 \
+OPTIMIZER=adamw \
+MICRO_BATCH_SIZE=16 \
+GLOBAL_BATCH_SIZE=256 \
+TIMEOUT_SECONDS=300 \
+MAX_STEPS=100 SAVE_STEPS=100 \
 OUTPUT_DIR=/workspace/runtime/outputs/full_sft_4gpu_100steps \
 bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
 ```
 
-`MAX_STEPS=100` 仍主要用于验证完整流程。正式微调时根据验证集结果增加训练步数，并用较小的
-`SAVE_STEPS` 定期保存。
+八卡运行：
 
-每个全量 DCP checkpoint 目录约为 70 GB，这是所有 rank 写出的分片文件合计，不是每张卡
-各写 70 GB。checkpoint 同时保存训练所需的完整模型参数和 AdamW optimizer 状态；AdamW
-通常为每个参数保存一阶、二阶矩，因此 optimizer 部分往往比模型权重本身更大。此外还有
-学习率调度器、随机数和 dataloader 状态。改变 GPU 数主要改变分片文件的数量和单片大小，
-不会按比例降低整个 checkpoint 的总容量。应提前检查 `/workspace/runtime` 的可用空间；如果
-只需要部署，可以在转换出 Hugging Face checkpoint 并确认可加载后删除不再需要的 DCP。
+```bash
+cd /RoboTwin
+TEACHER_MODE=none \
+GPU_COUNT=8 \
+OPTIMIZER=adamw \
+MICRO_BATCH_SIZE=16 \
+GLOBAL_BATCH_SIZE=256 \
+TIMEOUT_SECONDS=300 \
+MAX_STEPS=100 SAVE_STEPS=100 \
+OUTPUT_DIR=/workspace/runtime/outputs/full_sft_8gpu_100steps \
+bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
+```
 
-### 8.2 `enable_full_shard` 的选择
+### 8.3 `enable_full_shard` 的选择
 
 该参数在 FSDP2 中传给 `reshard_after_forward`，不是“是否启用 FSDP”的开关：
 
@@ -663,29 +740,45 @@ bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
 - `false`：forward 后保留当前模块的完整参数直到 backward；可以减少一次 all-gather，
   可能更快，但通常占用更多峰值显存。模型整体仍然使用 FSDP2 分片。
 
-四卡可以使用以下三种配置，正式复现默认选择第一种：
+可以使用以下三种配置，正式复现默认选择第一种：
 
 | 配置 | 关键参数 | 用途 |
 |---|---|---|
-| 四卡基础全量 SFT | shard 4、global batch 4、full shard | 本节默认的四卡复现配置 |
-| 四卡 no-reshard | shard 4、global batch 4、`enable_full_shard=false` | 比较少一次参数 all-gather 的速度和显存代价 |
-| 四卡 FP32/future-image 变体 | shard 4、full shard、`enable_fp32=true`、`use_future_image=true` | 检查额外训练开关；若 `align_params={}`，它不代表完整 depth/video alignment 训练 |
+| 基础全量 SFT | `data_parallel_shard_size=GPU_COUNT`、global batch 256、full shard | 本节默认配置 |
+| no-reshard | `data_parallel_shard_size=GPU_COUNT`、global batch 256、`enable_full_shard=false` | 比较少一次参数 all-gather 的速度和显存代价 |
+| FP32/future-image 变体 | shard `GPU_COUNT`、full shard、`enable_fp32=true`、`use_future_image=true` | 检查额外训练开关；若 `align_params={}`，它不代表完整 depth/video alignment 训练 |
 
-三种配置都设置 `use_lora=false`、micro batch 1、gradient checkpointing，并执行全参数
+三种配置都设置 `use_lora=false`、gradient checkpointing，并执行全参数
 forward、backward 和 optimizer step。它们是可选配置，不是三个连续训练阶段，也不需要
 全部运行。
 
 需要比较 no-reshard 时，只覆盖一个环境变量：
 
+四卡运行：
+
 ```bash
+GPU_COUNT=4 \
 ENABLE_FULL_SHARD=false \
+TEACHER_MODE=full \
 MAX_STEPS=1 \
 SAVE_STEPS=1 \
 OUTPUT_DIR=/workspace/runtime/outputs/full_sft_4gpu_no_reshard_1step \
 bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
 ```
 
-### 8.3 将全量 DCP 转换为推理 checkpoint 并重新推理
+八卡运行：
+
+```bash
+GPU_COUNT=8 \
+TEACHER_MODE=full \
+ENABLE_FULL_SHARD=false \
+MAX_STEPS=1 \
+SAVE_STEPS=1 \
+OUTPUT_DIR=/workspace/runtime/outputs/full_sft_8gpu_no_reshard_1step \
+bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
+```
+
+### 8.4 将全量 DCP 转换为推理 checkpoint 并重新推理
 
 全量 SFT 没有 LoRA adapter，因此这里是把分布式 DCP 聚合并保存为 Hugging Face 格式，
 不是把 adapter 合并回基础模型：
@@ -729,20 +822,36 @@ bash scripts/eval_policy.sh \
   --device_id 0 \
   --seed 0 \
   --test_num 10 \
-  --expert_check false \
+  --expert_check true \
+  --accept_expert_info_on_failure true \
   --eval_batch false
 ```
 
-确认单任务正常后，可以对转换后的全量 SFT 模型运行完整 50-task × 50-episode
-评测。该过程四卡约需 6 小时 50 分钟，单卡或双卡会更久；开始前先停止上面占用
-13400 端口的单卡全量 SFT 服务：
+确认单任务正常后，可以对转换后的全量 SFT 模型运行完整 100-task × 10-episode
+评测；开始前先停止上面占用 13400 端口的全量 SFT 服务。四卡运行：
 
 ```bash
 python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
   --gpu-count 4 \
-  --episodes 50 \
+  --episodes 10 \
+  --expert-check \
+  --accept-expert-info-on-failure \
   --model-path "$FULL_SFT_MODEL" \
-  --run-name full_sft_100steps_clean50x50_4gpu \
+  --run-name full_sft_100steps_both100x10_4gpu \
+  --runtime-dir /workspace/runtime \
+  --resume
+```
+
+八卡运行：
+
+```bash
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
+  --gpu-count 8 \
+  --episodes 10 \
+  --expert-check \
+  --accept-expert-info-on-failure \
+  --model-path "$FULL_SFT_MODEL" \
+  --run-name full_sft_100steps_both100x10_8gpu \
   --runtime-dir /workspace/runtime \
   --resume
 ```
@@ -811,10 +920,11 @@ git -C experiments/lingbot_vla_v2_6b_robotwin/source/lingbot-vla-v2 \
   checkout 951475ae1b1d87553e7dc47c97b53a3d695c0d13
 ```
 
-从本复现仓库应用三个兼容补丁：
+从本复现仓库应用三个兼容补丁：一个 RoboTwin 合并补丁、一个 XPolicyLab 补丁和一个
+LingBot-VLA-v2 补丁：
 
 ```bash
-git apply /path/to/RoboTwin-radeon-cloud/docker/patches/robotwin-rocm.patch
+git apply /path/to/RoboTwin-radeon-cloud/docker/patches/robotwin-rocm-reproduction.patch
 git -C XPolicyLab apply \
   /path/to/RoboTwin-radeon-cloud/docker/patches/xpolicylab-lerobot-v30.patch
 git -C experiments/lingbot_vla_v2_6b_robotwin/source/lingbot-vla-v2 apply \
@@ -826,10 +936,10 @@ cp -a /path/to/RoboTwin-radeon-cloud/docker/assets/experiments/lingbot_vla_v2_6b
 
 这些补丁完成：
 
-- 使用 MPLib 替代 CuRobo；
-- 兼容 LeRobot 0.6 数据读取接口；
-- 注册 action-expert LoRA 参数；
-- 修正 AMD 环境的评测和训练入口。
+- `robotwin-rocm-reproduction.patch`：合并 ROCm 环境兼容、CuRobo fallback、MPLib expert
+  批量规划、`expert_check=true` 的 expert/render 信息保留，以及 instruction fallback；
+- `xpolicylab-lerobot-v30.patch`：兼容 LeRobot 0.6 的数据转换和 EE 数据格式；
+- `lingbot-vla-v2-rocm.patch`：兼容 ROCm/LeRobot 训练、推理和 action-expert LoRA。
 
 ## 11. 创建模型环境
 
@@ -987,23 +1097,37 @@ cd /RoboTwin
 MODEL_ROOT=$PWD/experiments/lingbot_vla_v2_6b_robotwin/models
 mkdir -p "$MODEL_ROOT"
 
-huggingface-cli download robbyant/lingbot-vla-v2-6b-robotwin \
-  --revision 0451855729ec904f970600e0aec8b84661423afe \
-  --local-dir "$MODEL_ROOT/robbyant_lingbot-vla-v2-6b-robotwin"
+huggingface-cli download robbyant/lingbot-vla-v2-6b \
+  --revision 11c703bf6a5c1f45b3b69168482da11fdbba53d7 \
+  --local-dir "$MODEL_ROOT/robbyant_lingbot-vla-v2-6b"
 
 huggingface-cli download Qwen/Qwen3-VL-4B-Instruct \
   --revision ebb281ec70b05090aa6165b016eac8ec08e71b17 \
   --include '*.json' '*.txt' '*.jinja' merges.txt vocab.json \
   --local-dir "$MODEL_ROOT/Qwen3-VL-4B-Instruct-config-tokenizer"
+
+huggingface-cli download Ruicheng/moge-2-vitb-normal \
+  --revision ca5f0e07ff01d3e5a364c1d954ed12ee1814b368 \
+  --local-dir "$MODEL_ROOT/moge-2-vitb-normal"
 ```
 
 检查权重分片：
 
 ```bash
-find "$MODEL_ROOT/robbyant_lingbot-vla-v2-6b-robotwin/checkpoints/global_step_50000/hf_ckpt" \
+find "$MODEL_ROOT/robbyant_lingbot-vla-v2-6b" -maxdepth 1 \
   -name 'model-*.safetensors' | wc -l
 # 应为 6
+
+test -f "$MODEL_ROOT/robbyant_lingbot-vla-v2-6b/depth/model.pt"
+test -f "$MODEL_ROOT/robbyant_lingbot-vla-v2-6b/dino_video/teacher_step_10000.pth"
+test -f "$MODEL_ROOT/robbyant_lingbot-vla-v2-6b/dino_video/config.yaml"
+test -f "$MODEL_ROOT/moge-2-vitb-normal/model.pt"
 ```
+
+基础 checkpoint 自带 LingBot-Depth 和 DINO-VIDEO checkpoint/config，但不自带
+MoGe-2 权重；Qwen 下载仅保留 tokenizer/config，不需要重复下载一份 4B 权重。普通推理和
+不启用 alignment loss 的 LoRA/SFT 不加载这些 teacher，只有完整 depth/video teacher
+训练才会增加相应显存和计算开销。
 
 ## 14. 数据、推理和训练
 
@@ -1093,22 +1217,38 @@ python -c 'import torch; print(torch.__version__, torch.version.hip, torch.cuda.
 确认容器启动时传入 `/dev/kfd`、`/dev/dri`，并且没有安装 CUDA/PyPI torch 覆盖
 ROCm 版本。
 
-### Vulkan 或无头渲染失败
+### SAPIEN 与 svulkan2 日志
 
-在 ROCm/AMD 环境启动 SAPIEN 渲染器时，可能看到：
+旧版代码在 ROCm/AMD 环境启动 SAPIEN 渲染器时可能看到：
 
 ```text
 [svulkan2] [error] CUDA Error: cudaErrorInsufficientDriver
 [svulkan2] [error] Failed to initialize denoiser
 ```
 
-这是正常现象。svulkan2 会尝试初始化 NVIDIA CUDA denoiser，但当前环境使用 AMD
-ROCm，没有 NVIDIA CUDA driver，因此该可选降噪器初始化失败。只要程序随后继续
-运行、Vulkan 场景能够创建并且评测正常产生图像，就可以忽略这两行，不影响
-RoboTwin 闭环评测。
+这是 svulkan2 尝试初始化可选 NVIDIA CUDA denoiser 时产生的日志，不表示 ROCm
+评测失败。当前 Docker 镜像的 RoboTwin 补丁已经在创建任何 SAPIEN engine、scene 或
+renderer 之前关闭该 denoiser，并分别设置主体日志和渲染日志：
 
-只有在这两行之后程序退出、无法创建 renderer 或没有输出相机图像时，才属于真正
-的渲染故障，此时执行：
+```python
+import sapien.core as sapien
+
+sapien.set_log_level("warning")
+sapien.render.set_ray_tracing_denoiser("none")
+sapien.render.set_log_level("critical")
+```
+
+`sapien.set_log_level()` 控制 SAPIEN 主体及物理相关日志；真正控制上述
+`[svulkan2]` 消息的是 `sapien.render.set_log_level()`。代码必须位于
+`sapien.Engine()`、`sapien.Scene()`、`sapien.render.RenderSystem(...)` 或
+`sapien.SapienRenderer()` 之前。同时不得在后面的 `setup_scene()` 中再次调用
+`set_ray_tracing_denoiser("oidn")`，否则会重新启用 CUDA denoiser。
+
+在真实 `adjust_bottle` 单 episode 闭环测试中，修改后任务成功率为 1/1，日志中的
+`cudaErrorInsufficientDriver` 和 `Failed to initialize denoiser` 均为 0 条。这个设置只
+关闭可选光线追踪去噪器并调整日志级别，不关闭 Vulkan renderer，也不修改模型推理。
+
+如果仍然无法创建 renderer 或没有输出相机图像，执行：
 
 ```bash
 export PYOPENGL_PLATFORM=egl

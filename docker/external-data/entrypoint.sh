@@ -7,7 +7,7 @@ required_paths=(
   "${PERSISTENT_ROOT}/data/demo_clean"
   "${PERSISTENT_ROOT}/data/lerobot"
   "${PERSISTENT_ROOT}/data/robotwin_demo_clean_joint_v30.txt"
-  "${PERSISTENT_ROOT}/models/robbyant_lingbot-vla-v2-6b-robotwin/checkpoints/global_step_50000/hf_ckpt/model.safetensors.index.json"
+  "${PERSISTENT_ROOT}/models/robbyant_lingbot-vla-v2-6b/model.safetensors.index.json"
 )
 
 for required_path in "${required_paths[@]}"; do

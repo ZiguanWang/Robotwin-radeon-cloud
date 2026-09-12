@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run every RoboTwin clean task with one model server per GPU."""
+"""Run every RoboTwin task for one evaluation configuration."""
 
 from __future__ import annotations
 
@@ -21,10 +21,15 @@ import yaml
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run all RoboTwin clean tasks with a dynamic 1/2/4-GPU queue."
+        description="Run all RoboTwin tasks with a dynamic multi-GPU queue."
     )
-    parser.add_argument("--gpu-count", type=int, default=4, choices=(1, 2, 4))
-    parser.add_argument("--episodes", type=int, default=50)
+    parser.add_argument("--gpu-count", type=int, default=4, choices=(4, 8))
+    parser.add_argument("--episodes", type=int, default=10)
+    parser.add_argument(
+        "--task-config",
+        default="both",
+        choices=("both", "demo_clean", "demo_randomized"),
+    )
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--runtime-dir", type=Path, default=Path("/workspace/runtime"))
     parser.add_argument("--robotwin-root", type=Path, default=Path("/RoboTwin"))
@@ -33,10 +38,22 @@ def parse_args() -> argparse.Namespace:
         "--model-path",
         type=Path,
         default=None,
-        help="Hugging Face checkpoint directory; defaults to the official LingBot-VLA-v2 model.",
+        help="Checkpoint directory; defaults to the official LingBot-VLA-v2 base checkpoint.",
     )
     parser.add_argument("--base-port", type=int, default=13400)
     parser.add_argument("--use-compile", action="store_true")
+    parser.add_argument(
+        "--expert-check",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run the task's expert play_once() before every policy episode.",
+    )
+    parser.add_argument(
+        "--accept-expert-info-on-failure",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep a seed after play_once fails, using the rendered episode information.",
+    )
     parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
 
@@ -88,11 +105,11 @@ def read_result(log_path: Path) -> tuple[int, int]:
     return int(task_successes), int(task_episodes)
 
 
-def collect_results(tasks: list[str], logs_dir: Path) -> tuple[int, int]:
+def collect_results(work_items: list[tuple[str, str]], logs_dir: Path) -> tuple[int, int]:
     successes = 0
     episodes = 0
-    for task in tasks:
-        log_path = logs_dir / f"eval_{task}.log"
+    for task_config, task in work_items:
+        log_path = logs_dir / f"eval_{task_config}__{task}.log"
         task_successes, task_episodes = read_result(log_path)
         successes += task_successes
         episodes += task_episodes
@@ -105,19 +122,28 @@ def main() -> None:
         raise ValueError("--episodes must be positive")
 
     root = args.robotwin_root.resolve()
-    run_name = args.run_name or f"clean50x50_{args.gpu_count}gpu"
+    default_run_size = "100" if args.task_config == "both" else "50"
+    run_name = args.run_name or f"{args.task_config}_{default_run_size}x{args.episodes}_{args.gpu_count}gpu"
     run_dir = args.runtime_dir.resolve() / "outputs" / run_name
     if not args.resume and run_dir.exists() and any(run_dir.iterdir()):
         raise RuntimeError(f"{run_dir} is not empty; choose a new --run-name or pass --resume")
     logs_dir = run_dir / "logs"
     done_dir = run_dir / "done"
+    episode_info_dir = run_dir / "episode_info"
     logs_dir.mkdir(parents=True, exist_ok=True)
     done_dir.mkdir(parents=True, exist_ok=True)
+    episode_info_dir.mkdir(parents=True, exist_ok=True)
 
     with (root / "env_cfg/eval/all_tasks.yml").open(encoding="utf-8") as file:
         tasks = list(yaml.safe_load(file)["tasks"])
     if len(tasks) != 50 or len(set(tasks)) != 50:
         raise RuntimeError(f"Expected 50 unique tasks, got {len(tasks)}")
+    task_configs = (
+        ("demo_clean", "demo_randomized")
+        if args.task_config == "both"
+        else (args.task_config,)
+    )
+    work_items = [(task_config, task) for task_config in task_configs for task in tasks]
 
     gpu_count = int(
         subprocess.check_output(
@@ -128,14 +154,15 @@ def main() -> None:
         raise RuntimeError(f"Requested {args.gpu_count} GPUs, found {gpu_count}")
 
     completed = {path.stem for path in done_dir.glob("*.done")}
-    unknown_markers = completed - set(tasks)
+    expected_markers = {f"{task_config}__{task}" for task_config, task in work_items}
+    unknown_markers = completed - expected_markers
     if unknown_markers:
         raise RuntimeError(f"Unknown completion markers: {sorted(unknown_markers)}")
-    pending = [task for task in tasks if task not in completed]
+    pending = [item for item in work_items if f"{item[0]}__{item[1]}" not in completed]
     print(f"run={run_name} completed={len(completed)} pending={len(pending)}")
 
     if not pending:
-        successes, episode_count = collect_results(tasks, logs_dir)
+        successes, episode_count = collect_results(work_items, logs_dir)
         print(f"overall success: {successes}/{episode_count} = {100 * successes / episode_count:.2f}%")
         print(f"results: {run_dir}")
         return
@@ -152,7 +179,7 @@ def main() -> None:
         if args.model_path is not None
         else root
         / "experiments/lingbot_vla_v2_6b_robotwin/models/"
-        "robbyant_lingbot-vla-v2-6b-robotwin/checkpoints/global_step_50000/hf_ckpt"
+        "robbyant_lingbot-vla-v2-6b"
     )
     if not model_path.is_dir():
         raise FileNotFoundError(f"Model directory not found: {model_path}")
@@ -174,18 +201,19 @@ def main() -> None:
         for handle in server_handles:
             handle.close()
 
-    def evaluate(gpu_id: int, task: str) -> None:
+    def evaluate(gpu_id: int, task_config: str, task: str) -> None:
         port = args.base_port + gpu_id
         started = utc_now()
-        append_line(events_file, f"{started.isoformat()} gpu={gpu_id} task={task} start", write_lock)
-        log_path = logs_dir / f"eval_{task}.log"
+        item_name = f"{task_config}__{task}"
+        append_line(events_file, f"{started.isoformat()} gpu={gpu_id} config={task_config} task={task} start", write_lock)
+        log_path = logs_dir / f"eval_{item_name}.log"
         command = [
             args.python,
             str(root / "scripts/eval_policy_xpolicylab.py"),
             "--task_name",
             task,
             "--task_config",
-            "demo_clean",
+            task_config,
             "--policy_name",
             "LingBot-VLA-v2",
             "--protocol",
@@ -201,7 +229,11 @@ def main() -> None:
             "--test_num",
             str(args.episodes),
             "--expert_check",
-            "false",
+            str(args.expert_check).lower(),
+            "--accept_expert_info_on_failure",
+            str(args.accept_expert_info_on_failure).lower(),
+            "--episode_info_output",
+            str(episode_info_dir / f"{item_name}.jsonl"),
             "--eval_batch",
             "false",
         ]
@@ -233,11 +265,11 @@ def main() -> None:
         elapsed = int((ended - started).total_seconds())
         append_line(
             events_file,
-            f"{ended.isoformat()} gpu={gpu_id} task={task} elapsed={elapsed}s status={status}",
+            f"{ended.isoformat()} gpu={gpu_id} config={task_config} task={task} elapsed={elapsed}s status={status}",
             write_lock,
         )
         if status != 0:
-            append_line(failures_file, f"{task}\t{gpu_id}\t{elapsed}\t{status}", write_lock)
+            append_line(failures_file, f"{task_config}\t{task}\t{gpu_id}\t{elapsed}\t{status}", write_lock)
             raise RuntimeError(f"{task} failed on GPU {gpu_id}; inspect {log_path}")
         _, completed_episodes = read_result(log_path)
         if completed_episodes != args.episodes:
@@ -246,24 +278,24 @@ def main() -> None:
             )
         append_line(
             timing_file,
-            f"{task}\t{gpu_id}\t{started.isoformat()}\t{ended.isoformat()}\t{elapsed}\t0",
+            f"{task_config}\t{task}\t{gpu_id}\t{started.isoformat()}\t{ended.isoformat()}\t{elapsed}\t0",
             write_lock,
         )
-        (done_dir / f"{task}.done").touch()
-        print(f"[{len(list(done_dir.glob('*.done')))}/50] {task}: {elapsed}s on GPU {gpu_id}")
+        (done_dir / f"{item_name}.done").touch()
+        print(f"[{len(list(done_dir.glob('*.done')))}/{len(work_items)}] {task_config}/{task}: {elapsed}s on GPU {gpu_id}")
 
-    task_queue: queue.Queue[str] = queue.Queue()
-    for task in pending:
-        task_queue.put(task)
+    task_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+    for item in pending:
+        task_queue.put(item)
 
     def worker(gpu_id: int) -> None:
         while not stop_event.is_set():
             try:
-                task = task_queue.get_nowait()
+                task_config, task = task_queue.get_nowait()
             except queue.Empty:
                 return
             try:
-                evaluate(gpu_id, task)
+                evaluate(gpu_id, task_config, task)
             except Exception:
                 stop_event.set()
                 raise
@@ -321,11 +353,11 @@ def main() -> None:
         cleanup()
 
     markers = {path.stem for path in done_dir.glob("*.done")}
-    missing = sorted(set(tasks) - markers)
+    missing = sorted(expected_markers - markers)
     if missing:
         raise RuntimeError(f"Benchmark incomplete; missing tasks: {missing}")
-    successes, episode_count = collect_results(tasks, logs_dir)
-    expected_episodes = len(tasks) * args.episodes
+    successes, episode_count = collect_results(work_items, logs_dir)
+    expected_episodes = len(work_items) * args.episodes
     if episode_count != expected_episodes:
         raise RuntimeError(f"Expected {expected_episodes} episodes, found {episode_count}")
     elapsed = time.perf_counter() - started_perf

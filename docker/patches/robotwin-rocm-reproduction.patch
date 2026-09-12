@@ -1,5 +1,28 @@
+diff --git a/envs/_base_task.py b/envs/_base_task.py
+index 301da9f..6a46535 100644
+--- a/envs/_base_task.py
++++ b/envs/_base_task.py
+@@ -1,6 +1,10 @@
+ import os
+ import re
+ import sapien.core as sapien
++sapien.set_log_level("warning")
++sapien.render.set_ray_tracing_denoiser("none")
++sapien.render.set_log_level("critical")
++
+ from sapien.render import clear_cache as sapien_clear_cache
+ from sapien.utils.viewer import Viewer
+ import numpy as np
+@@ -214,7 +218,6 @@ class Base_Task(gym.Env):
+         sapien.render.set_camera_shader_dir("rt")
+         sapien.render.set_ray_tracing_samples_per_pixel(32)
+         sapien.render.set_ray_tracing_path_depth(8)
+-        sapien.render.set_ray_tracing_denoiser("oidn")
+ 
+         # declare sapien scene
+         scene_config = sapien.SceneConfig()
 diff --git a/envs/robot/planner.py b/envs/robot/planner.py
-index 21ae432..fdc8465 100644
+index 21ae432..ac0468a 100644
 --- a/envs/robot/planner.py
 +++ b/envs/robot/planner.py
 @@ -271,10 +271,42 @@ try:
@@ -45,8 +68,48 @@ index 21ae432..fdc8465 100644
  
  # ********************** MplibPlanner **********************
  class MplibPlanner:
+@@ -422,6 +454,39 @@ class MplibPlanner:
+ 
+         return result
+ 
++    def plan_batch(
++        self,
++        curr_joint_pos,
++        target_gripper_pose_list,
++        constraint_pose=None,
++        arms_tag=None,
++    ):
++        """MPLib compatibility implementation of Curobo's batch planner.
++
++        MPLib has no equivalent batch API, so evaluate each candidate pose
++        independently and preserve the result layout used by
++        ``Base_Task.choose_best_pose``.
++        """
++        statuses = []
++        positions = []
++        velocities = []
++        for target_pose in target_gripper_pose_list:
++            result = self.plan_path(
++                curr_joint_pos,
++                target_pose,
++                arms_tag=arms_tag,
++                log=False,
++            )
++            statuses.append(result.get("status", "Fail"))
++            positions.append(result.get("position", []))
++            velocities.append(result.get("velocity", []))
++
++        return {
++            "status": np.asarray(statuses, dtype=object),
++            "position": positions,
++            "velocity": velocities,
++        }
++
+     def plan_grippers(self, now_val, target_val):
+         num_step = 200  # TODO
+         dis_val = target_val - now_val
 diff --git a/envs/robot/robot.py b/envs/robot/robot.py
-index 9dfc08f..04fb174 100644
+index 9dfc08f..d90ec9f 100644
 --- a/envs/robot/robot.py
 +++ b/envs/robot/robot.py
 @@ -301,13 +301,23 @@ class Robot:
@@ -83,7 +146,35 @@ index 9dfc08f..04fb174 100644
                  scene,
              )
  
-@@ -439,6 +449,13 @@ class Robot:
+@@ -370,6 +380,13 @@ class Robot:
+         for i in range(len(target_lst_copy)):
+             target_lst_copy[i] = self._trans_from_gripper_to_endlink(target_lst_copy[i], arm_tag="left")
+ 
++        if os.environ.get("ROBOTWIN_EE_PLANNER", "").startswith("mplib"):
++            if not hasattr(self, "left_mplib_planner"):
++                raise RuntimeError("MPLib EE fallback requested but left MPLib planner is unavailable")
++            return self.left_mplib_planner.plan_batch(
++                now_qpos, target_lst_copy, constraint_pose=constraint_pose, arms_tag="left"
++            )
++
+         if self.communication_flag:
+             self.left_conn.send({
+                 "cmd": "plan_batch",
+@@ -405,6 +422,13 @@ class Robot:
+         for i in range(len(target_lst_copy)):
+             target_lst_copy[i] = self._trans_from_gripper_to_endlink(target_lst_copy[i], arm_tag="right")
+ 
++        if os.environ.get("ROBOTWIN_EE_PLANNER", "").startswith("mplib"):
++            if not hasattr(self, "right_mplib_planner"):
++                raise RuntimeError("MPLib EE fallback requested but right MPLib planner is unavailable")
++            return self.right_mplib_planner.plan_batch(
++                now_qpos, target_lst_copy, constraint_pose=constraint_pose, arms_tag="right"
++            )
++
+         if self.communication_flag:
+             self.right_conn.send({
+                 "cmd": "plan_batch",
+@@ -439,6 +463,13 @@ class Robot:
  
          trans_target_pose = self._trans_from_gripper_to_endlink(target_pose, arm_tag="left")
  
@@ -97,7 +188,7 @@ index 9dfc08f..04fb174 100644
          if self.communication_flag:
              self.left_conn.send({
                  "cmd": "plan_path",
-@@ -473,6 +490,13 @@ class Robot:
+@@ -473,6 +504,13 @@ class Robot:
  
          trans_target_pose = self._trans_from_gripper_to_endlink(target_pose, arm_tag="right")
  
@@ -112,10 +203,17 @@ index 9dfc08f..04fb174 100644
              self.right_conn.send({
                  "cmd": "plan_path",
 diff --git a/scripts/eval_policy_xpolicylab.py b/scripts/eval_policy_xpolicylab.py
-index a0e5614..9bb59de 100644
+index a0e5614..f659cb4 100644
 --- a/scripts/eval_policy_xpolicylab.py
 +++ b/scripts/eval_policy_xpolicylab.py
-@@ -9,6 +9,7 @@ import os
+@@ -3,12 +3,14 @@ from __future__ import annotations
+ import argparse
+ import ast
+ import copy
++import json
+ import importlib
+ import multiprocessing as mp
+ import os
  import queue
  import subprocess
  import sys
@@ -123,7 +221,7 @@ index a0e5614..9bb59de 100644
  import traceback
  from collections.abc import Mapping, Sequence
  from datetime import datetime
-@@ -85,6 +86,18 @@ def build_policy_client(usr_args: dict[str, Any]):
+@@ -85,6 +87,18 @@ def build_policy_client(usr_args: dict[str, Any]):
      host = usr_args.get("host") or usr_args.get("policy_server_host") or "localhost"
      port = usr_args.get("port") or usr_args.get("policy_server_port")
  
@@ -142,7 +240,7 @@ index a0e5614..9bb59de 100644
      if protocol == "ws":
          from client_server.ws import WsModelClient
  
-@@ -174,6 +187,10 @@ def load_task_args(usr_args: dict[str, Any]) -> tuple[dict[str, Any], str]:
+@@ -174,6 +188,10 @@ def load_task_args(usr_args: dict[str, Any]) -> tuple[dict[str, Any], str]:
      args["task_config"] = task_config
      args["ckpt_setting"] = ckpt_setting
      args["policy_name"] = usr_args["policy_name"]
@@ -153,7 +251,7 @@ index a0e5614..9bb59de 100644
      ensure_xpolicylab_observation_flags(args)
  
      embodiment_type = args.get("embodiment")
-@@ -302,7 +319,7 @@ def main(usr_args: dict[str, Any]) -> None:
+@@ -302,7 +320,7 @@ def main(usr_args: dict[str, Any]) -> None:
      usr_args["right_arm_dim"] = len(args["right_embodiment_config"]["arm_joints_name"][1])
  
      seed = int(usr_args["seed"])
@@ -162,7 +260,7 @@ index a0e5614..9bb59de 100644
      test_num = int(usr_args.get("test_num", 100))
  
      model_client = build_policy_client(usr_args)
-@@ -362,7 +379,7 @@ def main_batch(usr_args: dict[str, Any]) -> None:
+@@ -362,7 +380,7 @@ def main_batch(usr_args: dict[str, Any]) -> None:
          print_config(args, embodiment_name)
  
      seed = int(usr_args["seed"])
@@ -171,7 +269,7 @@ index a0e5614..9bb59de 100644
      test_num = int(usr_args.get("test_num") or 100)
      requested_workers = int(usr_args.get("num_workers") or 1)
      worker_num = max(1, min(requested_workers, test_num))
-@@ -685,6 +702,7 @@ def run_one_batch_episode(
+@@ -685,6 +703,7 @@ def run_one_batch_episode(
          task_env._set_eval_video_ffmpeg(ffmpeg)
  
      succ = False
@@ -179,7 +277,7 @@ index a0e5614..9bb59de 100644
      prepare_policy_case(model_client, task_name, seed_value, instruction, action_type)
      reset_policy(model_client)
      try:
-@@ -698,7 +716,9 @@ def run_one_batch_episode(
+@@ -698,7 +717,9 @@ def run_one_batch_episode(
                  task_env=task_env,
              )
              model_client.call(func_name="update_obs", obs=xpl_obs)
@@ -189,7 +287,7 @@ index a0e5614..9bb59de 100644
              if len(action_chunk) == 0:
                  raise RuntimeError("Policy returned an empty action chunk.")
  
-@@ -737,6 +757,14 @@ def run_one_batch_episode(
+@@ -737,6 +758,14 @@ def run_one_batch_episode(
  
      notify_trial_end(model_client, task_name, seed_value, succ)
  
@@ -204,7 +302,7 @@ index a0e5614..9bb59de 100644
      task_env.close_env()
      if task_env.render_freq:
          task_env.viewer.close()
-@@ -747,6 +775,8 @@ def run_one_batch_episode(
+@@ -747,6 +776,8 @@ def run_one_batch_episode(
          "worker_id": worker_id,
          "seed": seed_value,
          "success": bool(succ),
@@ -213,7 +311,86 @@ index a0e5614..9bb59de 100644
      }
  
  
-@@ -808,7 +838,14 @@ def eval_remote_policy(
+@@ -766,6 +797,9 @@ def eval_remote_policy(
+     print(f"\033[34mPolicy Name: {args['policy_name']}\033[0m")
+ 
+     expert_check = parse_bool(usr_args.get("expert_check", True))
++    accept_expert_info = parse_bool(
++        usr_args.get("accept_expert_info_on_failure", True)
++    )
+     frequency = int(usr_args.get("frequency", usr_args.get("ctrl_freq", 30)))
+     action_type = str(usr_args.get("action_type", "joint"))
+ 
+@@ -784,23 +818,58 @@ def eval_remote_policy(
+         episode_info = {"info": {}}
+ 
+         if expert_check:
++            expert_plan_success = False
++            expert_task_success = False
++            expert_error = None
+             try:
+                 task_env.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
+                 episode_info = task_env.play_once()
++                expert_plan_success = bool(task_env.plan_success)
++                expert_task_success = bool(task_env.check_success())
++                output_path = usr_args.get("episode_info_output")
++                if output_path:
++                    output_path = Path(output_path)
++                    output_path.parent.mkdir(parents=True, exist_ok=True)
++                    record = {
++                        "task_name": task_name,
++                        "task_config": args["task_config"],
++                        "seed": now_seed,
++                        "plan_success": expert_plan_success,
++                        "task_success": expert_task_success,
++                        "info": episode_info.get("info", {}),
++                        "episode_info": episode_info,
++                    }
++                    with output_path.open("a", encoding="utf-8") as output_file:
++                        output_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+                 task_env.close_env()
+-            except UnStableError:
++            except UnStableError as exc:
++                expert_error = {"type": type(exc).__name__, "message": str(exc)}
++                try:
++                    episode_info = {"info": {}, "render_observation": task_env.get_obs()}
++                except Exception:
++                    episode_info = {"info": {}}
+                 task_env.close_env()
+-                now_seed += 1
+-                args["render_freq"] = render_freq
+-                continue
++                if not accept_expert_info:
++                    now_seed += 1
++                    continue
+             except Exception as e:
++                expert_error = {"type": type(e).__name__, "message": str(e)}
++                try:
++                    episode_info = {"info": {}, "render_observation": task_env.get_obs()}
++                except Exception:
++                    episode_info = {"info": {}}
+                 task_env.close_env()
+-                now_seed += 1
+-                args["render_freq"] = render_freq
+-                print(f"error occurs during expert check! seed={now_seed - 1} err={type(e).__name__}: {e}")
+-                continue
+-
+-        if (not expert_check) or (task_env.plan_success and task_env.check_success()):
++                if not accept_expert_info:
++                    now_seed += 1
++                    args["render_freq"] = render_freq
++                    print(f"error occurs during expert check! seed={now_seed - 1} err={type(e).__name__}: {e}")
++                    continue
++
++        if (
++            (not expert_check)
++            or accept_expert_info
++            or (expert_plan_success and expert_task_success)
++        ):
+             succ_seed += 1
+         else:
+             now_seed += 1
+@@ -808,7 +877,14 @@ def eval_remote_policy(
              continue
  
          args["render_freq"] = render_freq
@@ -229,7 +406,7 @@ index a0e5614..9bb59de 100644
  
          instruction = build_instruction(args, episode_info, instruction_type, test_num)
          task_env.set_instruction(instruction=instruction)
-@@ -843,11 +880,38 @@ def eval_remote_policy(
+@@ -843,11 +919,38 @@ def eval_remote_policy(
              task_env._set_eval_video_ffmpeg(ffmpeg)
  
          succ = False
@@ -270,7 +447,7 @@ index a0e5614..9bb59de 100644
                  xpl_obs = robotwin_obs_to_xpolicylab(
                      observation,
                      instruction=task_env.get_instruction(),
-@@ -856,7 +920,9 @@ def eval_remote_policy(
+@@ -856,7 +959,9 @@ def eval_remote_policy(
                      task_env=task_env,
                  )
                  model_client.call(func_name="update_obs", obs=xpl_obs)
@@ -280,7 +457,7 @@ index a0e5614..9bb59de 100644
                  if len(action_chunk) == 0:
                      raise RuntimeError("Policy returned an empty action chunk.")
  
-@@ -893,7 +959,16 @@ def eval_remote_policy(
+@@ -893,7 +998,16 @@ def eval_remote_policy(
          if task_env.eval_video_path is not None:
              task_env._del_eval_video_ffmpeg()
  
@@ -298,7 +475,7 @@ index a0e5614..9bb59de 100644
  
          if succ:
              task_env.suc += 1
-@@ -921,6 +996,9 @@ def eval_remote_policy(
+@@ -921,19 +1035,37 @@ def eval_remote_policy(
  
  
  def build_instruction(args: dict[str, Any], episode_info: dict[str, Any], instruction_type: str | None, test_num: int) -> str:
@@ -308,7 +485,43 @@ index a0e5614..9bb59de 100644
      if not instruction_type:
          return args["task_name"]
  
-@@ -1280,12 +1358,13 @@ def parse_args() -> dict[str, Any]:
++    episode_parameters = episode_info.get("info", {})
++    if episode_parameters:
++        try:
++            results = generate_episode_descriptions(
++                args["task_name"], [episode_parameters], test_num
++            )
++            candidates = results[0].get(instruction_type)
++            if candidates:
++                return np.random.choice(candidates)
++        except Exception as exc:
++            print(f"Failed to render episode instruction: {type(exc).__name__}: {exc}")
++
++    instruction_file = (
++        ROBOTWIN_ROOT / "description" / "task_instruction" / f"{args['task_name']}.json"
++    )
+     try:
+-        episode_info_list = [episode_info.get("info", {})]
+-        results = generate_episode_descriptions(args["task_name"], episode_info_list, test_num)
+-        candidates = results[0].get(instruction_type)
+-        if candidates:
+-            return np.random.choice(candidates)
+-    except Exception:
+-        print("Failed to generate episode instruction; using task name as instruction.")
++        full_description = yaml.safe_load(instruction_file.read_text(encoding="utf-8")).get(
++            "full_description"
++        )
++        if full_description:
++            return str(full_description)
++    except (OSError, AttributeError, yaml.YAMLError) as exc:
++        print(f"Failed to load task description: {type(exc).__name__}: {exc}")
+ 
+-    return args["task_name"]
++    return args["task_name"].replace("_", " ")
+ 
+ 
+ def reset_policy(model_client) -> None:
+@@ -1280,16 +1412,19 @@ def parse_args() -> dict[str, Any]:
      parser.add_argument("--policy_name", required=True)
      parser.add_argument("--host", default="localhost")
      parser.add_argument("--port", required=True)
@@ -323,7 +536,13 @@ index a0e5614..9bb59de 100644
      parser.add_argument("--task_config", default="demo_clean")
      parser.add_argument("--test_num", type=int, default=None)
      parser.add_argument("--instruction_type", choices=("seen", "unseen"))
-@@ -1311,6 +1390,8 @@ def parse_args() -> dict[str, Any]:
+     parser.add_argument("--expert_check", default=None)
++    parser.add_argument("--accept_expert_info_on_failure", default=None)
++    parser.add_argument("--episode_info_output", default=None)
+     parser.add_argument("--frequency", type=int, default=None)
+     parser.add_argument("--num_workers", type=int, default=None)
+     parser.add_argument("--max_seed_attempts", type=int, default=None)
+@@ -1311,11 +1446,17 @@ def parse_args() -> dict[str, Any]:
          "xpolicylab_root": str(Path(args.root_dir).resolve() / "XPolicyLab"),
          "eval_batch": parse_bool(args.eval_batch),
      }
@@ -332,4 +551,12 @@ index a0e5614..9bb59de 100644
  
      if args.test_num is not None:
          usr_args["test_num"] = args.test_num
-
+     if args.expert_check is not None:
+         usr_args["expert_check"] = parse_bool(args.expert_check)
++    if args.accept_expert_info_on_failure is not None:
++        usr_args["accept_expert_info_on_failure"] = parse_bool(args.accept_expert_info_on_failure)
++    if args.episode_info_output is not None:
++        usr_args["episode_info_output"] = args.episode_info_output
+     if args.frequency is not None:
+         usr_args["frequency"] = args.frequency
+     if args.num_workers is not None:

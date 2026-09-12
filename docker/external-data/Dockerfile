@@ -76,6 +76,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 
 RUN /opt/robotwin-env/bin/python - <<'PY'
 import torch, torchvision, numpy, sapien, mplib, lerobot
+import pipeline, utils3d
 assert torch.__file__.startswith('/opt/venv/'), torch.__file__
 assert torch.version.hip is not None
 assert numpy.__version__ == '1.26.4'
@@ -89,13 +90,18 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 ENV PYTHONPATH=/opt/aiter
 
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    git clone https://github.com/ROCm/aiter.git /opt/aiter && \
-    git -C /opt/aiter checkout "${AITER_COMMIT}" && \
+    git init /opt/aiter && \
+    git -C /opt/aiter remote add origin https://github.com/ROCm/aiter.git && \
+    git -C /opt/aiter fetch --depth 1 origin "${AITER_COMMIT}" && \
+    git -C /opt/aiter checkout FETCH_HEAD && \
     cd /opt/aiter && \
+    sed -i '/flydsl==0.1.9.dev599/d' pyproject.toml && \
     GPU_ARCHS="${AITER_GPU_ARCHS}" AITER_USE_SYSTEM_TRITON=1 \
         /opt/robotwin-env/bin/python setup.py develop && \
-    git clone https://github.com/ZiguanWang/flash-attention.git /tmp/flash-attention && \
-    git -C /tmp/flash-attention checkout "${FLASH_ATTENTION_COMMIT}" && \
+    git init /tmp/flash-attention && \
+    git -C /tmp/flash-attention remote add origin https://github.com/ZiguanWang/flash-attention.git && \
+    git -C /tmp/flash-attention fetch --depth 1 origin "${FLASH_ATTENTION_COMMIT}" && \
+    git -C /tmp/flash-attention checkout FETCH_HEAD && \
     cd /tmp/flash-attention && \
     AITER_TRITON_ONLY=1 \
     GPU_ARCHS="${AITER_GPU_ARCHS}" \
@@ -108,6 +114,8 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 RUN /opt/robotwin-env/bin/python - <<'PY'
 from importlib.metadata import version
 
+import aiter
+import flash_attn
 import triton
 
 assert version("flash-attn") == "2.8.4"
@@ -123,7 +131,7 @@ RUN git clone --recurse-submodules https://github.com/RoboTwin-Platform/RoboTwin
     git -C /RoboTwin checkout "${ROBOTWIN_COMMIT}" && \
     git -C /RoboTwin submodule update --init --recursive && \
     test "$(git -C /RoboTwin rev-parse HEAD)" = "${ROBOTWIN_COMMIT}" && \
-    git -C /RoboTwin apply /tmp/robotwin-patches/robotwin-rocm.patch && \
+    git -C /RoboTwin apply /tmp/robotwin-patches/robotwin-rocm-reproduction.patch && \
     git -C /RoboTwin/XPolicyLab apply /tmp/robotwin-patches/xpolicylab-lerobot-v30.patch && \
     mkdir -p /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/source && \
     git clone https://github.com/robbyant/lingbot-vla-v2.git \

@@ -24,7 +24,7 @@ data:
   - '{''arm.position'': ''bounds_99_woclip''}'
   - '{''end.position'': ''bounds_99_woclip''}'
   - '{''effector.position'': ''bounds_99_woclip''}'
-  num_workers: 0
+  num_workers: 4
   pin_memory: true
   prefetch_factor: 4
   prompt_type: global
@@ -40,7 +40,7 @@ model:
   attn_implementation: flash_attention_2
   basic_modules: []
   config_key: LingbotVLAV2Config
-  config_path: /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/models/robbyant_lingbot-vla-v2-6b-robotwin/checkpoints/global_step_50000/hf_ckpt
+  config_path: /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/models/robbyant_lingbot-vla-v2-6b
   decoders: {}
   encode_target: false
   encoders: {}
@@ -48,7 +48,7 @@ model:
   force_use_huggingface: false
   incremental_training: false
   input_encoder: encoder
-  model_path: /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/models/robbyant_lingbot-vla-v2-6b-robotwin/checkpoints/global_step_50000/hf_ckpt
+  model_path: /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/models/robbyant_lingbot-vla-v2-6b
   moe_implementation: fused
   output_encoder: decoder
   post_training: false
