@@ -54,6 +54,12 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Keep a seed after play_once fails, using the rendered episode information.",
     )
+    parser.add_argument(
+        "--video",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Record episode MP4 videos; disabled by default to reduce evaluation overhead.",
+    )
     parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
 
@@ -236,6 +242,8 @@ def main() -> None:
             str(episode_info_dir / f"{item_name}.jsonl"),
             "--eval_batch",
             "false",
+            "--additional_info",
+            f"eval_video_log={str(args.video).lower()}",
         ]
         env = os.environ.copy()
         env.update(
@@ -243,6 +251,7 @@ def main() -> None:
             ROBOTWIN_DISABLE_CUROBO="1",
             ROBOTWIN_EE_PLANNER="mplib",
             PYOPENGL_PLATFORM="egl",
+            PYTHONUNBUFFERED="1",
         )
         env.pop("ROCR_VISIBLE_DEVICES", None)
         env.pop("CUDA_VISIBLE_DEVICES", None)

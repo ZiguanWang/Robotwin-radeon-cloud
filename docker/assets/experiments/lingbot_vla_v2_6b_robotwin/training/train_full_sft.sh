@@ -25,7 +25,7 @@ TEACHER_MODE="${TEACHER_MODE:-full}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-0}"
 OUTPUT_DIR="${OUTPUT_DIR:-/workspace/runtime/outputs/full_sft_${GPU_COUNT}gpu_${MAX_STEPS}steps}"
 DATA_LIST="${DATA_LIST:-${ROBOTWIN_ROOT}/data/robotwin_demo_clean_joint_v30.txt}"
-CONFIG="${CONFIG:-${ROBOTWIN_ROOT}/experiments/lingbot_vla_v2_6b_robotwin/training/reproduction_100steps/lingbotvla_cli.yaml}"
+CONFIG="${CONFIG:-${ROBOTWIN_ROOT}/experiments/lingbot_vla_v2_6b_robotwin/training/lingbotvla_cli.yaml}"
 
 SOURCE_DIR="${ROBOTWIN_ROOT}/experiments/lingbot_vla_v2_6b_robotwin/source/lingbot-vla-v2"
 MODEL_ROOT="${ROBOTWIN_ROOT}/experiments/lingbot_vla_v2_6b_robotwin/models"

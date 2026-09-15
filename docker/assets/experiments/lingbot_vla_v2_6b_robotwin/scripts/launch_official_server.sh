@@ -9,6 +9,8 @@ python_bin=${LINGBOT_VLA_PYTHON:-/opt/robotwin-env/bin/python}
 # post-training checkpoints must be passed explicitly with argument 5.
 default_model_path="$root/models/robbyant_lingbot-vla-v2-6b"
 qwen_path="$root/models/Qwen3-VL-4B-Instruct-config-tokenizer"
+training_config="$root/training/lingbotvla_cli.yaml"
+model_config="$root/models/robbyant_lingbot-vla-v2-6b-robotwin/lingbotvla_cli.yaml"
 
 hip_id=${1:?usage: launch_official_server.sh HIP_ID PORT LOG_FILE [USE_COMPILE]}
 port=${2:?}
@@ -22,6 +24,15 @@ export HIP_VISIBLE_DEVICES="$hip_id"
 unset ROCR_VISIBLE_DEVICES
 unset CUDA_VISIBLE_DEVICES
 export QWEN3VL_PATH="$qwen_path"
+if [[ -n "${LINGBOTVLA_TRAINING_CONFIG:-}" ]]; then
+    export LINGBOTVLA_TRAINING_CONFIG
+elif [[ "$model_path" == "$default_model_path" && -f "$model_config" ]]; then
+    export LINGBOTVLA_TRAINING_CONFIG="$model_config"
+else
+    export LINGBOTVLA_TRAINING_CONFIG="$training_config"
+fi
+export AITER_TRITON_ONLY=1
+export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
 export SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0
 
 cd "$source_root"

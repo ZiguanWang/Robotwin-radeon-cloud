@@ -169,8 +169,11 @@ RUN rm -rf \
     ln -s /models/robotwin-persistent/models \
         /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/models
 
+# jupyter_server 2.21.0 is incompatible with Tornado 6.5.x. Keep the
+# Jupyter runtime on the last compatible Tornado release.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    /opt/venv/bin/python -m pip install --prefer-binary --upgrade 'jupyterlab==4.6.3' && \
+    /opt/venv/bin/python -m pip install --prefer-binary --upgrade \
+        'jupyterlab==4.6.3' 'tornado==6.4.2' && \
     test "$(/opt/venv/bin/jupyter-lab --version)" = "4.6.3" && \
     test -d /opt/venv/share/jupyter/lab/static
 

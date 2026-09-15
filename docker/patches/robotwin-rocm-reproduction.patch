@@ -25,14 +25,18 @@ diff --git a/envs/robot/planner.py b/envs/robot/planner.py
 index 21ae432..ac0468a 100644
 --- a/envs/robot/planner.py
 +++ b/envs/robot/planner.py
-@@ -271,10 +271,42 @@ try:
+@@ -271,10 +271,43 @@ try:
              return result_p, result_q
      
  except Exception as e:
 +    _CUROBO_IMPORT_ERROR = e
-     print('[planner.py]: Something wrong happened when importing CuroboPlanner! Please check if Curobo is installed correctly. If the problem still exists, you can install Curobo from https://github.com/NVlabs/curobo manually.')
-     print('Exception traceback:')
-     traceback.print_exc()
+-    print('[planner.py]: Something wrong happened when importing CuroboPlanner! Please check if Curobo is installed correctly. If the problem still exists, you can install Curobo from https://github.com/NVlabs/curobo manually.')
+-    print('Exception traceback:')
+-    traceback.print_exc()
++    if __import__('os').environ.get('ROBOTWIN_DISABLE_CUROBO') != '1':
++        print('[planner.py]: Something wrong happened when importing CuroboPlanner! Please check if Curobo is installed correctly. If the problem still exists, you can install Curobo from https://github.com/NVlabs/curobo manually.')
++        print('Exception traceback:')
++        traceback.print_exc()
  
 +    class CuroboPlanner:
 +        """Allow policy-only rollouts to initialize without Curobo kernels.

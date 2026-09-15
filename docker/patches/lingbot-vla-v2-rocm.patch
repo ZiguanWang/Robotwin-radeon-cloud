@@ -1,8 +1,77 @@
 diff --git a/deploy/lingbot_vla_v2_policy.py b/deploy/lingbot_vla_v2_policy.py
-index 96b9acb..0611313 100644
+index 96b9acb..1856115 100644
 --- a/deploy/lingbot_vla_v2_policy.py
 +++ b/deploy/lingbot_vla_v2_policy.py
-@@ -288,6 +288,9 @@ class LingbotVLAv2Server:
+@@ -224,6 +224,18 @@ class LingbotVLAv2Server:
+         self.use_fp32 = use_fp32
+         self.action_key: str= "action"
+ 
++    @staticmethod
++    def _is_training_alignment_key(key: str) -> bool:
++        """Identify teacher-only alignment weights absent from inference policy."""
++        return key.startswith((
++            "model.current_video_align_",
++            "model.depth_align_",
++            "model.future_depth_align_",
++            "model.future_video_align_",
++            "model.current_shared_task_proj",
++            "model.future_shared_task_proj",
++        ))
++
+     def load_model_weights(self, path_to_pi_model, strict=True):
+         all_safetensors = glob(os.path.join(path_to_pi_model, "*.safetensors"))
+         merged_weights = {}
+@@ -232,6 +244,26 @@ class LingbotVLAv2Server:
+             with safe_open(file_path, framework="pt", device="cpu") as f:
+                 for key in f.keys():
+                     merged_weights[key] = f.get_tensor(key)
++        inference_keys = set(self.vla.state_dict())
++        training_only_keys = {
++            key for key in merged_weights
++            if key not in inference_keys and self._is_training_alignment_key(key)
++        }
++        unexpected_keys = set(merged_weights) - inference_keys - training_only_keys
++        if unexpected_keys:
++            raise RuntimeError(
++                "Unexpected checkpoint keys not understood by inference model: "
++                + ", ".join(sorted(unexpected_keys))
++            )
++        if training_only_keys:
++            print(
++                f"Ignoring {len(training_only_keys)} full-SFT training-only "
++                "alignment weights during inference"
++            )
++            merged_weights = {
++                key: value for key, value in merged_weights.items()
++                if key not in training_only_keys
++            }
+         self.vla.load_state_dict(merged_weights, strict=strict)
+ 
+     def merge_qwen_config(self, qwen_config):
+@@ -273,7 +273,21 @@ class LingbotVLAv2Server:
+         print(f"loading model from: {path_to_pi_model}")
+         
+         # load training config
+-        training_config_path = Path(path_to_pi_model).parent.parent.parent/'lingbotvla_cli.yaml'
++        configured_path = os.environ.get('LINGBOTVLA_TRAINING_CONFIG')
++        experiment_root = Path(__file__).resolve().parents[3]
++        candidate_paths = [
++            Path(configured_path) if configured_path else None,
++            Path(path_to_pi_model) / 'lingbotvla_cli.yaml',
++            Path(path_to_pi_model).parent.parent.parent / 'lingbotvla_cli.yaml',
++            experiment_root / 'training/lingbotvla_cli.yaml',
++        ]
++        training_config_path = next(
++            (candidate for candidate in candidate_paths if candidate and candidate.is_file()),
++            None,
++        )
++        if training_config_path is None:
++            searched = ', '.join(str(candidate) for candidate in candidate_paths if candidate)
++            raise FileNotFoundError(f'No LingBot-VLA training config found; searched: {searched}')
+         with open(training_config_path, 'r') as f:
+             training_config = yaml.safe_load(f)
+         f.close()
+@@ -288,6 +302,9 @@ class LingbotVLAv2Server:
  
          # Set attention_implementation to 'eager' to speed up evaluation.
          config.attention_implementation = 'eager'
@@ -13,7 +82,7 @@ index 96b9acb..0611313 100644
          # set base model according to training config
          training_base_model = training_config['model']['tokenizer_path']
 diff --git a/lingbotvla/data/vla_data/base_dataset.py b/lingbotvla/data/vla_data/base_dataset.py
-index 71d62a0..93e5cec 100644
+index 71d62a0..30f121f 100644
 --- a/lingbotvla/data/vla_data/base_dataset.py
 +++ b/lingbotvla/data/vla_data/base_dataset.py
 @@ -24,7 +24,11 @@ from torchvision.transforms.v2 import Resize
@@ -50,7 +119,7 @@ index 71d62a0..93e5cec 100644
          )
  
 diff --git a/lingbotvla/data/vla_data/multi_vla_dataset.py b/lingbotvla/data/vla_data/multi_vla_dataset.py
-index 1923aa6..422c445 100644
+index e6f0e14..4ba24e5 100644
 --- a/lingbotvla/data/vla_data/multi_vla_dataset.py
 +++ b/lingbotvla/data/vla_data/multi_vla_dataset.py
 @@ -1,3 +1,5 @@
@@ -59,7 +128,7 @@ index 1923aa6..422c445 100644
  from typing import Callable
  import numpy as np
  from lingbotvla.utils import helper
-@@ -22,6 +24,19 @@ def get_all_tasks(task_files, sep=' '):
+@@ -26,6 +28,19 @@ def get_all_tasks(task_files, sep=' '):
                  if not line:
                      continue
                  data_name, task = line.split(sep)
@@ -79,6 +148,22 @@ index 1923aa6..422c445 100644
                  data_names.append(data_name)
                  task_list.append(task)
          f.close()
+diff --git a/lingbotvla/data/vla_data/utils.py b/lingbotvla/data/vla_data/utils.py
+index 1daf261..e957e0e 100644
+--- a/lingbotvla/data/vla_data/utils.py
++++ b/lingbotvla/data/vla_data/utils.py
+@@ -86,6 +86,11 @@ class FeatureTransform:
+ 
+         if norm_stats_path is None:
+             norm_stats_path = robot_config.pop('norm_stats')
++            if not os.path.isabs(norm_stats_path):
++                repository_root = os.path.abspath(
++                    os.path.join(os.path.dirname(__file__), "../../..")
++                )
++                norm_stats_path = os.path.join(repository_root, norm_stats_path)
+         else:
+             robot_config.pop('norm_stats')
+ 
 diff --git a/lingbotvla/utils/arguments.py b/lingbotvla/utils/arguments.py
 index 4b8c495..6413247 100644
 --- a/lingbotvla/utils/arguments.py
@@ -206,18 +291,3 @@ index a4427fe..2cbb02c 100644
      use_future_depth = args.train.align_params.get('depth', {}).get('use_future_depth', False)
      use_future_video = use_depth_align and args.train.align_params.get('use_future_video', False)
 
-diff --git a/lingbotvla/data/vla_data/utils.py b/lingbotvla/data/vla_data/utils.py
---- a/lingbotvla/data/vla_data/utils.py
-+++ b/lingbotvla/data/vla_data/utils.py
-@@ -85,6 +85,11 @@ class FeatureTransform:
- 
-         if norm_stats_path is None:
-             norm_stats_path = robot_config.pop('norm_stats')
-+            if not os.path.isabs(norm_stats_path):
-+                repository_root = os.path.abspath(
-+                    os.path.join(os.path.dirname(__file__), "../../..")
-+                )
-+                norm_stats_path = os.path.join(repository_root, norm_stats_path)
-         else:
-             robot_config.pop('norm_stats')
- 

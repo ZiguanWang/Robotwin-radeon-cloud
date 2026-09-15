@@ -40,6 +40,19 @@ full 和 external-data 镜像包含相同的源码、兼容补丁及 Python 环�
 /opt/lerobot-env            LeRobot v3 数据转换环境
 ```
 
+Radeon Cloud Global 当前的持久化 `/workspace` 空间只有 100 GB。启动训练或评测前，
+建议先检查根盘和持久化 workspace 的剩余空间，以及 runtime 输出目录的占用：
+
+```bash
+df -h / /workspace
+du -d1 -h /workspace/runtime/outputs
+```
+
+较大的中间编译文件、缓存或临时结果可以先放在 `/` 下的临时目录，以减轻
+`/workspace` 的压力；但根盘内容通常不会随实例销毁而持久保存。最终 checkpoint、日志、
+评测结果以及需要保留的模型必须复制或移动到 `/workspace` 持久化空间，并在销毁实例前确认
+文件已经写入该目录。
+
 ## 1. 构建镜像
 
 ### 1.1 full 镜像
@@ -160,16 +173,23 @@ Radeon Cloud 使用本项目构建并上传到镜像仓库的 **external-data �
 robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1-external-data
 ```
 
-1. 登录 Radeon Cloud。如果本地还没有 SSH 密钥，先执行
+1. 登录 Radeon Cloud。登录后默认进入 **Classic** 风格界面；点击页面右下角的
+   **Switch to the new design** 切换到 **New** 风格界面，后续实例配置步骤以新版界面为准。
+   如果本地还没有 SSH 密钥，先执行
    `ssh-keygen -t ed25519` 生成密钥，然后在平台中点击 **Settings → New SSH Key**，
    粘贴 `~/.ssh/id_ed25519.pub` 的内容并保存。只能上传 `.pub` 公钥，不要上传私钥。
 2. 在实例配置页面点击 **Customize**，根据需要选择 **4 GPUs** 或 **8 GPUs**；在
-   **Image** 中选择 **robotwin**，在 **Resource Pool** 中选择本次比赛对应的资源池，
-   最后在 **Mount a model** 中选择 **Devzone**。如果没有选择 Devzone，实例内不会
-   挂载 external-data 镜像所需的数据。
-3. 选择 **Devzone** 后，平台后台会把相应内容挂载到 `/models`，用户不需要手动
+   **Image** 中选择 **robotwin**，在 **Resource Pool** 中选择本次比赛对应的资源池 **Dev**，
+   在 **Workspace Storage** 中选择 **Persistent /workspace**，最后在 **Mount a model**
+   中选择 **Devzone**。如果没有选择 Devzone，实例内不会挂载 external-data 镜像所需的数据。
+3. 选择 **Persistent /workspace** 后，训练 checkpoint、日志和评测结果会保存在持久化
+   workspace 中；选择 **Devzone** 后，平台后台会把相应内容挂载到 `/models`，用户不需要手动
    挂载。external-data
    所需内容位于其中的 `/models/robotwin-persistent`，目录结构为：
+
+   每次运行前后都应检查 `/workspace` 的剩余空间。LoRA 和 Full-SFT checkpoint 可能占用
+   数十 GB；不再需要的旧 LoRA 结果和中间输出应及时清理。若临时将中间结果放在根盘，
+   必须在实例销毁前将最终结果保存到持久化 `/workspace`。
 
    ```text
    /models/robotwin-persistent/
@@ -205,8 +225,9 @@ robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1-exter
    `adjust_bottle` 的 10-episode 闭环评测，以及可选的四卡/八卡 clean + randomized
    100-task × 10-episode 全量评测。训练流程包括四卡/八卡 LoRA 微调、LoRA checkpoint 合并、
    四卡/八卡全参数 SFT、全参数 DCP checkpoint 合并，以及分别在同一 13400 端口
-   重新启动合并模型并再次进行闭环评测。Notebook 中的长时间 GPU 单元不会自动
-   执行，需要用户根据实例 GPU 数量确认配置后手动运行。
+   重新启动合并模型并再次进行闭环评测。Notebook 的闭环 benchmark、LoRA 训练和 LoRA
+   benchmark 默认使用 8 卡；四卡分支仍然保留，只需修改对应 GPU 配置。Notebook 中的
+   长时间 GPU 单元不会自动执行，需要用户根据实例 GPU 数量确认配置后手动运行。
 5. 进入实例后先检查当前目录及后台挂载：
 
    ```bash
@@ -319,6 +340,19 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/benchmark_official_inferen
 
 ## 6. RoboTwin 闭环评测
 
+官方 `robbyant/lingbot-vla-v2-6b` baseline checkpoint 主要用于验证模型服务、渲染、规划器和评测链路；它在 RoboTwin 上的实际成功率可能不高，因此单次结果不应直接当作部署失败。需要更好的 RoboTwin 任务效果时，可以评测 LingBot 官方已经针对 RoboTwin 训练过的 checkpoint：
+
+- [Hugging Face：robbyant/lingbot-vla-v2-6b-robotwin](https://huggingface.co/robbyant/lingbot-vla-v2-6b-robotwin)
+- [LingBot-VLA-v2 官方仓库](https://github.com/robbyant/lingbot-vla-v2)
+
+下面先保留 baseline 评测命令，再给出 RoboTwin checkpoint 的对应命令。比赛或复现训练必须从 baseline checkpoint 开始，不能从已经训练好的 RoboTwin checkpoint 开始。
+
+以下命令默认关闭视频以减少 RGB 传输、ffmpeg 编码和磁盘写入开销。单个 episode 评测使用
+`--additional_info eval_video_log=false`；需要保存视频时，建议将其改为
+`--additional_info eval_video_log=true`，而不是依赖删除参数后的任务默认值。长 benchmark
+使用 `--no-video`；需要保存视频时应改为 `--video`，仅删除 `--no-video` 仍会使用脚本默认的
+不录视频设置。第 7 节 LoRA checkpoint 和第 8 节 Full-SFT checkpoint 的评测遵循相同规则。
+
 保持模型 server 运行，在模型环境中执行：
 
 ```bash
@@ -347,7 +381,47 @@ python scripts/eval_policy_xpolicylab.py \
   --test_num 10 \
   --expert_check true \
   --accept_expert_info_on_failure true \
-  --eval_batch false
+  --eval_batch false \
+  --additional_info eval_video_log=false
+```
+
+如果需要评测官方已经针对 RoboTwin 训练过的 checkpoint，先停止正在运行的 baseline server，再启动 RoboTwin checkpoint server：
+
+```bash
+cd /RoboTwin
+source /opt/robotwin-env/bin/activate
+
+export ROBOTWIN_CHECKPOINT=/models/robotwin-persistent/models/robbyant_lingbot-vla-v2-6b-robotwin
+export LINGBOTVLA_TRAINING_CONFIG="$ROBOTWIN_CHECKPOINT/lingbotvla_cli.yaml"
+export ROBOTWIN_DISABLE_CUROBO=1
+export ROBOTWIN_EE_PLANNER=mplib
+export PYOPENGL_PLATFORM=egl
+
+bash experiments/lingbot_vla_v2_6b_robotwin/scripts/launch_official_server.sh \
+  0 13400 /workspace/runtime/outputs/logs/robotwin_checkpoint_server.log False \
+  "$ROBOTWIN_CHECKPOINT"
+```
+
+然后使用与 baseline 相同的单次闭环评测参数：
+
+```bash
+cd /RoboTwin
+source /opt/robotwin-env/bin/activate
+
+python scripts/eval_policy_xpolicylab.py \
+  --task_name adjust_bottle \
+  --task_config demo_clean \
+  --policy_name LingBot-VLA-v2 \
+  --protocol lingbot_vla_v2 \
+  --host 127.0.0.1 \
+  --port 13400 \
+  --device_id 0 \
+  --seed 0 \
+  --test_num 10 \
+  --expert_check true \
+  --accept_expert_info_on_failure true \
+  --eval_batch false \
+  --additional_info eval_video_log=false
 ```
 
 也可以通过统一入口运行同一组参数：
@@ -365,7 +439,8 @@ bash scripts/eval_policy.sh \
   --test_num 10 \
   --expert_check true \
   --accept_expert_info_on_failure true \
-  --eval_batch false
+  --eval_batch false \
+  --additional_info eval_video_log=false
 ```
 
 评测结果写入 `/workspace/runtime/eval_result`。首次检查环境时可以临时改成
@@ -391,6 +466,7 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
   --episodes 10 \
   --expert-check \
   --accept-expert-info-on-failure \
+  --no-video \
   --run-name both100x10_4gpu \
   --runtime-dir /workspace/runtime \
   --resume
@@ -415,7 +491,51 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
   --episodes 10 \
   --expert-check \
   --accept-expert-info-on-failure \
+  --no-video \
   --run-name both100x10_8gpu \
+  --runtime-dir /workspace/runtime \
+  --resume
+```
+
+如果要使用官方 RoboTwin checkpoint 运行同样的四卡/八卡长 benchmark，保持
+`LINGBOTVLA_TRAINING_CONFIG` 指向 checkpoint 自带的训练配置，并通过
+`--model-path` 传入 checkpoint。先确认没有其他 server 占用对应端口。
+
+四卡 RoboTwin checkpoint benchmark：
+
+```bash
+cd /RoboTwin
+source /opt/robotwin-env/bin/activate
+
+export ROBOTWIN_CHECKPOINT=/models/robotwin-persistent/models/robbyant_lingbot-vla-v2-6b-robotwin
+export LINGBOTVLA_TRAINING_CONFIG="$ROBOTWIN_CHECKPOINT/lingbotvla_cli.yaml"
+export ROBOTWIN_DISABLE_CUROBO=1
+export ROBOTWIN_EE_PLANNER=mplib
+export PYOPENGL_PLATFORM=egl
+
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
+  --gpu-count 4 \
+  --episodes 10 \
+  --model-path "$ROBOTWIN_CHECKPOINT" \
+  --expert-check \
+  --accept-expert-info-on-failure \
+  --no-video \
+  --run-name robotwin_checkpoint_both100x10_4gpu \
+  --runtime-dir /workspace/runtime \
+  --resume
+```
+
+八卡时改为：
+
+```bash
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
+  --gpu-count 8 \
+  --episodes 10 \
+  --model-path "$ROBOTWIN_CHECKPOINT" \
+  --expert-check \
+  --accept-expert-info-on-failure \
+  --no-video \
+  --run-name robotwin_checkpoint_both100x10_8gpu \
   --runtime-dir /workspace/runtime \
   --resume
 ```
@@ -449,7 +569,7 @@ python -m torch.distributed.run \
   --standalone \
   --nproc-per-node=4 \
   -m tasks.vla.train_lingbotvla \
-  /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/training/reproduction_100steps/lingbotvla_cli.yaml \
+  /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/training/lingbotvla_cli.yaml \
   --train.data_parallel_shard_size 4 \
   --train.gradient_accumulation_steps 1 \
   --train.global_batch_size 4 \
@@ -466,7 +586,7 @@ python -m torch.distributed.run \
   --standalone \
   --nproc-per-node=8 \
   -m tasks.vla.train_lingbotvla \
-  /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/training/reproduction_100steps/lingbotvla_cli.yaml \
+  /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/training/lingbotvla_cli.yaml \
   --train.data_parallel_shard_size 8 \
   --train.gradient_accumulation_steps 1 \
   --train.global_batch_size 8 \
@@ -556,12 +676,13 @@ bash scripts/eval_policy.sh \
   --test_num 10 \
   --expert_check true \
   --accept_expert_info_on_failure true \
-  --eval_batch false
+  --eval_batch false \
+  --additional_info eval_video_log=false
 ```
 
 确认 `adjust_bottle` 正常后，可以对合并后的 LoRA 模型运行完整 100-task ×
 10-episode 评测；开始前先停止上面占用 13400 端口的合并模型服务，因为脚本会自行启动
-一组 4/8 卡模型服务。四卡运行：
+一组 4/8 卡模型服务。Notebook 默认使用八卡；命令行仍分别给出四卡和八卡示例。四卡运行：
 
 ```bash
 python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
@@ -569,6 +690,7 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
   --episodes 10 \
   --expert-check \
   --accept-expert-info-on-failure \
+  --no-video \
   --model-path "$MERGED" \
   --run-name lora_100steps_both100x10_4gpu \
   --runtime-dir /workspace/runtime \
@@ -583,6 +705,7 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
   --episodes 10 \
   --expert-check \
   --accept-expert-info-on-failure \
+  --no-video \
   --model-path "$MERGED" \
   --run-name lora_100steps_both100x10_8gpu \
   --runtime-dir /workspace/runtime \
@@ -596,6 +719,8 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
 
 这是与第 7 节 LoRA 相互独立的训练流程。默认训练启用完整 depth/video teacher；不带
 teacher 的普通 SFT 可以运行，但会缺少对应的深度/视频监督，效果较差，不推荐用于正式复现。
+完整 teacher 会在训练 checkpoint 中保存仅用于 alignment loss 的额外 head；转换后的推理
+模型不使用这些 head，部署 patch 会在保持其余权重严格校验的前提下过滤这些训练专用参数。
 先停止占用 GPU 的模型 server，然后运行统一训练入口：
 
 ### 8.1 默认：完整 depth/video teacher 训练
@@ -607,8 +732,8 @@ batch 16 与容量表一致：
 
 | GPU 数 | `data_parallel_shard_size` | `micro_batch_size` | `gradient_accumulation_steps` | `global_batch_size` |
 |---:|---:|---:|---:|---:|
-| 4（默认） | 4 | 16 | 4 | 256 |
-| 8 | 8 | 16 | 2 | 256 |
+| 8（默认） | 8 | 16 | 2 | 256 |
+| 4 | 4 | 16 | 4 | 256 |
 
 四卡运行：
 
@@ -647,8 +772,8 @@ bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
 `SAVE_STEPS`；通常将两者设为相同值，需要更频繁保存 checkpoint 时可以单独减小
 `SAVE_STEPS`。
 
-四卡和八卡的完整 teacher 容量测试均验证到 micro batch 16，故默认使用四卡
-`16 × 4 × 4 = 256`、八卡 `16 × 8 × 2 = 256`。脚本使用以下关键参数，其中 shard size
+四卡和八卡的完整 teacher 容量测试均验证到 micro batch 16，故 notebook 默认使用八卡
+`16 × 8 × 2 = 256`；四卡配置为 `16 × 4 × 4 = 256`。脚本使用以下关键参数，其中 shard size
 和梯度累积由 `GPU_COUNT` 自动计算：
 
 ```text
@@ -824,7 +949,8 @@ bash scripts/eval_policy.sh \
   --test_num 10 \
   --expert_check true \
   --accept_expert_info_on_failure true \
-  --eval_batch false
+  --eval_batch false \
+  --additional_info eval_video_log=false
 ```
 
 确认单任务正常后，可以对转换后的全量 SFT 模型运行完整 100-task × 10-episode
@@ -836,6 +962,7 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
   --episodes 10 \
   --expert-check \
   --accept-expert-info-on-failure \
+  --no-video \
   --model-path "$FULL_SFT_MODEL" \
   --run-name full_sft_100steps_both100x10_4gpu \
   --runtime-dir /workspace/runtime \
@@ -850,6 +977,7 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
   --episodes 10 \
   --expert-check \
   --accept-expert-info-on-failure \
+  --no-video \
   --model-path "$FULL_SFT_MODEL" \
   --run-name full_sft_100steps_both100x10_8gpu \
   --runtime-dir /workspace/runtime \

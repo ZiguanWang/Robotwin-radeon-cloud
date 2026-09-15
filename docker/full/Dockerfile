@@ -246,8 +246,11 @@ RUN mkdir -p /workspace/runtime && \
     rm -rf /RoboTwin/eval_result && \
     ln -s /workspace/runtime/eval_result /RoboTwin/eval_result
 
+# jupyter_server 2.21.0 is incompatible with Tornado 6.5.x. Keep the
+# Jupyter runtime on the last compatible Tornado release.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    /opt/venv/bin/python -m pip install --prefer-binary --upgrade 'jupyterlab==4.6.3' && \
+    /opt/venv/bin/python -m pip install --prefer-binary --upgrade \
+        'jupyterlab==4.6.3' 'tornado==6.4.2' && \
     test "$(/opt/venv/bin/jupyter-lab --version)" = "4.6.3" && \
     test -d /opt/venv/share/jupyter/lab/static
 
