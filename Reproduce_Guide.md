@@ -573,6 +573,9 @@ python -m torch.distributed.run \
   --train.data_parallel_shard_size 4 \
   --train.gradient_accumulation_steps 1 \
   --train.global_batch_size 4 \
+  --train.max_steps 100 \
+  --train.save_steps 100 \
+  --train.output_dir /workspace/runtime/outputs/lora_100steps_4gpu \
   2>&1 | tee /workspace/runtime/outputs/logs/lora_100steps_4gpu.log
 ```
 
@@ -590,6 +593,9 @@ python -m torch.distributed.run \
   --train.data_parallel_shard_size 8 \
   --train.gradient_accumulation_steps 1 \
   --train.global_batch_size 8 \
+  --train.max_steps 100 \
+  --train.save_steps 100 \
+  --train.output_dir /workspace/runtime/outputs/lora_100steps_8gpu \
   2>&1 | tee /workspace/runtime/outputs/logs/lora_100steps_8gpu.log
 ```
 
@@ -601,7 +607,8 @@ batch size 为 8，因此还必须满足
 四卡、八卡的梯度累积步数按对应的 global batch 和数据并行规模设置。训练输出位于：
 
 ```text
-/workspace/runtime/outputs/reproduction_100steps
+/workspace/runtime/outputs/lora_100steps_4gpu
+/workspace/runtime/outputs/lora_100steps_8gpu
 ```
 
 这里有三项名称相近但用途不同的 attention 配置：
@@ -628,7 +635,7 @@ Notebook 会同步覆盖 `--train.max_steps`、`--train.save_steps` 和
 ```bash
 --train.max_steps 1000 \
 --train.save_steps 1000 \
---train.output_dir /workspace/runtime/outputs/reproduction_1000steps
+--train.output_dir /workspace/runtime/outputs/lora_1000steps_8gpu
 ```
 
 ### 7.2 合并 LoRA checkpoint 并重新推理
@@ -637,11 +644,11 @@ Notebook 会同步覆盖 `--train.max_steps`、`--train.save_steps` 和
 cd /RoboTwin
 source /opt/robotwin-env/bin/activate
 
-MERGED=/workspace/runtime/outputs/reproduction_100steps/merged_checkpoint/global_step_100/hf_ckpt
+MERGED=/workspace/runtime/outputs/lora_100steps_8gpu/merged_checkpoint/global_step_100/hf_ckpt
 
 python experiments/lingbot_vla_v2_6b_robotwin/scripts/merge_lora_dcp.py \
-  --checkpoint /workspace/runtime/outputs/reproduction_100steps/checkpoints/global_step_100 \
-  --training-output /workspace/runtime/outputs/reproduction_100steps \
+  --checkpoint /workspace/runtime/outputs/lora_100steps_8gpu/checkpoints/global_step_100 \
+  --training-output /workspace/runtime/outputs/lora_100steps_8gpu \
   --base-model /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/models/robbyant_lingbot-vla-v2-6b \
   --output "$MERGED" \
   --rank 8 \
@@ -745,9 +752,9 @@ GPU_COUNT=4 \
 OPTIMIZER=adamw \
 MICRO_BATCH_SIZE=16 \
 GLOBAL_BATCH_SIZE=256 \
-TIMEOUT_SECONDS=300 \
-MAX_STEPS=100 SAVE_STEPS=100 \
-OUTPUT_DIR=/workspace/runtime/outputs/teacher_full_4gpu_100steps \
+TIMEOUT_SECONDS=0 \
+MAX_STEPS=10 SAVE_STEPS=10 \
+OUTPUT_DIR=/workspace/runtime/outputs/full_sft_full_4gpu_10steps \
 bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
 ```
 
@@ -761,9 +768,9 @@ GPU_COUNT=8 \
 OPTIMIZER=adamw \
 MICRO_BATCH_SIZE=16 \
 GLOBAL_BATCH_SIZE=256 \
-TIMEOUT_SECONDS=300 \
-MAX_STEPS=100 SAVE_STEPS=100 \
-OUTPUT_DIR=/workspace/runtime/outputs/teacher_full_8gpu_100steps \
+TIMEOUT_SECONDS=0 \
+MAX_STEPS=10 SAVE_STEPS=10 \
+OUTPUT_DIR=/workspace/runtime/outputs/full_sft_full_8gpu_10steps \
 bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
 ```
 
@@ -835,9 +842,9 @@ GPU_COUNT=4 \
 OPTIMIZER=adamw \
 MICRO_BATCH_SIZE=16 \
 GLOBAL_BATCH_SIZE=256 \
-TIMEOUT_SECONDS=300 \
-MAX_STEPS=100 SAVE_STEPS=100 \
-OUTPUT_DIR=/workspace/runtime/outputs/full_sft_4gpu_100steps \
+TIMEOUT_SECONDS=0 \
+MAX_STEPS=10 SAVE_STEPS=10 \
+OUTPUT_DIR=/workspace/runtime/outputs/full_sft_none_4gpu_10steps \
 bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
 ```
 
@@ -850,9 +857,9 @@ GPU_COUNT=8 \
 OPTIMIZER=adamw \
 MICRO_BATCH_SIZE=16 \
 GLOBAL_BATCH_SIZE=256 \
-TIMEOUT_SECONDS=300 \
-MAX_STEPS=100 SAVE_STEPS=100 \
-OUTPUT_DIR=/workspace/runtime/outputs/full_sft_8gpu_100steps \
+TIMEOUT_SECONDS=0 \
+MAX_STEPS=10 SAVE_STEPS=10 \
+OUTPUT_DIR=/workspace/runtime/outputs/full_sft_none_8gpu_10steps \
 bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
 ```
 
@@ -912,9 +919,9 @@ bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
 cd /RoboTwin
 source /opt/robotwin-env/bin/activate
 
-TRAIN_OUTPUT=/workspace/runtime/outputs/full_sft_4gpu_100steps
-CHECKPOINT="$TRAIN_OUTPUT/checkpoints/global_step_100"
-FULL_SFT_MODEL="$TRAIN_OUTPUT/merged_checkpoint/global_step_100/hf_ckpt"
+TRAIN_OUTPUT=/workspace/runtime/outputs/full_sft_full_8gpu_10steps
+CHECKPOINT="$TRAIN_OUTPUT/checkpoints/global_step_10"
+FULL_SFT_MODEL="$TRAIN_OUTPUT/merged_checkpoint/global_step_10/hf_ckpt"
 
 python experiments/lingbot_vla_v2_6b_robotwin/scripts/convert_full_sft_dcp.py \
   --checkpoint "$CHECKPOINT" \
