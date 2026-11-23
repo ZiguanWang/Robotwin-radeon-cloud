@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run every RoboTwin task for one evaluation configuration."""
+"""Run every RoboTwin task for one or both evaluation configurations."""
 
 from __future__ import annotations
 
@@ -23,8 +23,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run all RoboTwin tasks with a dynamic multi-GPU queue."
     )
-    parser.add_argument("--gpu-count", type=int, default=4, choices=(4, 8))
-    parser.add_argument("--episodes", type=int, default=10)
+    parser.add_argument("--gpu-count", type=int, default=4, choices=(1, 4, 8))
+    parser.add_argument("--episodes", type=int, default=100)
+    parser.add_argument(
+        "--instruction-type", choices=("seen", "unseen"), default=None,
+        help="Override the task config's eval_instruction (clean=seen, randomized=unseen).",
+    )
+    parser.add_argument(
+        "--dri-prime-map",
+        default=os.environ.get("ROBOTWIN_DRI_PRIME_MAP", ""),
+        help="Optional comma-separated PCI-form selectors; detected from HIP PCI addresses by default",
+    )
     parser.add_argument(
         "--task-config",
         default="both",
@@ -41,18 +50,13 @@ def parse_args() -> argparse.Namespace:
         help="Checkpoint directory; defaults to the official LingBot-VLA-v2 base checkpoint.",
     )
     parser.add_argument("--base-port", type=int, default=13400)
-    parser.add_argument("--use-compile", action="store_true")
+    parser.add_argument("--show-gpu-map", action="store_true", help="Print the selected HIP/DRI_PRIME map and exit")
+    parser.add_argument("--use-compile", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--expert-check",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Run the task's expert play_once() before every policy episode.",
-    )
-    parser.add_argument(
-        "--accept-expert-info-on-failure",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Keep a seed after play_once fails, using the rendered episode information.",
     )
     parser.add_argument(
         "--video",
@@ -104,10 +108,18 @@ def wait_for_server(process: subprocess.Popen[bytes], port: int, log_path: Path)
 def read_result(log_path: Path) -> tuple[int, int]:
     pattern = re.compile(r"Final success rate:\s*(\d+)/(\d+)\s*=\s*([0-9.]+)%")
     text = log_path.read_text(encoding="utf-8", errors="ignore").replace("\r", "\n")
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)
     matches = pattern.findall(text)
     if not matches:
         raise RuntimeError(f"Missing final success rate in {log_path}")
     task_successes, task_episodes, _ = matches[-1]
+    progress = re.findall(r"Success rate:\s*(\d+)/(\d+)\s*=>", text)
+    if not progress or tuple(map(int, progress[-1])) != (
+        int(task_successes), int(task_episodes)
+    ):
+        raise RuntimeError(
+            f"Final result does not match completed policy rollouts in {log_path}"
+        )
     return int(task_successes), int(task_episodes)
 
 
@@ -126,19 +138,54 @@ def main() -> None:
     args = parse_args()
     if args.episodes <= 0:
         raise ValueError("--episodes must be positive")
+    if args.dri_prime_map:
+        dri_prime_map = [item.strip() for item in args.dri_prime_map.split(",") if item.strip()]
+    else:
+        resolver = Path(__file__).with_name("resolve_dri_prime.py")
+        discovered = subprocess.check_output(
+            [args.python, str(resolver), "--all"], text=True
+        ).strip().split(",")
+        if len(discovered) < args.gpu_count:
+            raise RuntimeError(
+                f"Requested {args.gpu_count} GPUs, found {len(discovered)} HIP devices"
+            )
+        dri_prime_map = discovered[: args.gpu_count]
+    if len(dri_prime_map) != args.gpu_count or any(
+        not re.fullmatch(r"pci-[0-9a-fA-F]{4}_[0-9a-fA-F]{2}_[0-9a-fA-F]{2}_[0-7]!", item)
+        for item in dri_prime_map
+    ):
+        raise ValueError("--dri-prime-map must provide one PCI-form selector per GPU")
+    print("HIP -> DRI_PRIME:", ", ".join(f"{i}={value}" for i, value in enumerate(dri_prime_map)))
+    if args.show_gpu_map:
+        return
 
     root = args.robotwin_root.resolve()
     default_run_size = "100" if args.task_config == "both" else "50"
     run_name = args.run_name or f"{args.task_config}_{default_run_size}x{args.episodes}_{args.gpu_count}gpu"
     run_dir = args.runtime_dir.resolve() / "outputs" / run_name
-    if not args.resume and run_dir.exists() and any(run_dir.iterdir()):
+    has_existing_run = run_dir.exists() and any(run_dir.iterdir())
+    instruction_mode = args.instruction_type or "task_config"
+    instruction_mode_file = run_dir / "instruction_mode.txt"
+    if not args.resume and has_existing_run:
         raise RuntimeError(f"{run_dir} is not empty; choose a new --run-name or pass --resume")
+    if args.resume and has_existing_run:
+        if not instruction_mode_file.is_file():
+            raise RuntimeError(
+                f"{run_dir} has no instruction mode record; choose a new --run-name "
+                "instead of mixing old and new evaluation results"
+            )
+        recorded_mode = instruction_mode_file.read_text(encoding="utf-8").strip()
+        if recorded_mode != instruction_mode:
+            raise RuntimeError(
+                f"{run_dir} used instruction mode {recorded_mode!r}, "
+                f"requested {instruction_mode!r}; choose a new --run-name"
+            )
     logs_dir = run_dir / "logs"
     done_dir = run_dir / "done"
-    episode_info_dir = run_dir / "episode_info"
     logs_dir.mkdir(parents=True, exist_ok=True)
     done_dir.mkdir(parents=True, exist_ok=True)
-    episode_info_dir.mkdir(parents=True, exist_ok=True)
+    if not instruction_mode_file.exists():
+        instruction_mode_file.write_text(instruction_mode + "\n", encoding="utf-8")
 
     with (root / "env_cfg/eval/all_tasks.yml").open(encoding="utf-8") as file:
         tasks = list(yaml.safe_load(file)["tasks"])
@@ -151,9 +198,16 @@ def main() -> None:
     )
     work_items = [(task_config, task) for task_config in task_configs for task in tasks]
 
+    visibility_env = os.environ.copy()
+    for name in (
+        "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL"
+    ):
+        visibility_env.pop(name, None)
     gpu_count = int(
         subprocess.check_output(
-            [args.python, "-c", "import torch; print(torch.cuda.device_count())"], text=True
+            [args.python, "-c", "import torch; print(torch.cuda.device_count())"],
+            text=True,
+            env=visibility_env,
         ).strip()
     )
     if gpu_count < args.gpu_count:
@@ -165,7 +219,10 @@ def main() -> None:
     if unknown_markers:
         raise RuntimeError(f"Unknown completion markers: {sorted(unknown_markers)}")
     pending = [item for item in work_items if f"{item[0]}__{item[1]}" not in completed]
-    print(f"run={run_name} completed={len(completed)} pending={len(pending)}")
+    print(
+        f"run={run_name} instruction_mode={instruction_mode} "
+        f"completed={len(completed)} pending={len(pending)}"
+    )
 
     if not pending:
         successes, episode_count = collect_results(work_items, logs_dir)
@@ -179,7 +236,7 @@ def main() -> None:
     if not (run_dir / "run_start_iso").exists():
         (run_dir / "run_start_iso").write_text(utc_now().isoformat() + "\n", encoding="utf-8")
 
-    server_script = root / "experiments/lingbot_vla_v2_6b_robotwin/scripts/launch_official_server.sh"
+    server_script = root / "experiments/lingbot_vla_v2_6b_robotwin/scripts/serving/launch_official_server.sh"
     model_path = (
         args.model_path.expanduser().resolve()
         if args.model_path is not None
@@ -228,33 +285,33 @@ def main() -> None:
             "127.0.0.1",
             "--port",
             str(port),
-            "--device_id",
-            "0",
             "--seed",
             "0",
             "--test_num",
             str(args.episodes),
             "--expert_check",
             str(args.expert_check).lower(),
-            "--accept_expert_info_on_failure",
-            str(args.accept_expert_info_on_failure).lower(),
-            "--episode_info_output",
-            str(episode_info_dir / f"{item_name}.jsonl"),
             "--eval_batch",
             "false",
             "--additional_info",
             f"eval_video_log={str(args.video).lower()}",
         ]
+        if args.instruction_type is not None:
+            command.extend(("--instruction_type", args.instruction_type))
         env = os.environ.copy()
         env.update(
             HIP_VISIBLE_DEVICES=str(gpu_id),
+            DRI_PRIME=dri_prime_map[gpu_id],
             ROBOTWIN_DISABLE_CUROBO="1",
             ROBOTWIN_EE_PLANNER="mplib",
             PYOPENGL_PLATFORM="egl",
             PYTHONUNBUFFERED="1",
         )
-        env.pop("ROCR_VISIBLE_DEVICES", None)
-        env.pop("CUDA_VISIBLE_DEVICES", None)
+        for name in (
+            "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL",
+            "HSA_OVERRIDE_GFX_VERSION", "MESA_VK_DEVICE_SELECT",
+        ):
+            env.pop(name, None)
         with log_path.open("wb") as log_handle:
             process = subprocess.Popen(
                 command,

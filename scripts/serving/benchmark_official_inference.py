@@ -38,13 +38,14 @@ def main():
             response = client.infer(request)
             wall_ms = (time.perf_counter() - started) * 1000
             action = np.asarray(response["action"])
+            action_steps = int(action.shape[-2])
             record = {
                 "batch_size": batch_size,
                 "repeat": repeat,
                 "wall_ms": wall_ms,
                 "server_infer_ms": response["server_timing"]["infer_ms"],
                 "action_shape": list(action.shape),
-                "env_steps_per_s": batch_size * 25 / (wall_ms / 1000),
+                "env_steps_per_s": batch_size * action_steps / (wall_ms / 1000),
                 "action_chunks_per_s": batch_size / (wall_ms / 1000),
             }
             records.append(record)

@@ -6,13 +6,15 @@ cd /RoboTwin
 export HF_LEROBOT_HOME="${HF_LEROBOT_HOME:-/RoboTwin/data/lerobot}"
 export LEROBOT_VIDEO_BACKEND="${LEROBOT_VIDEO_BACKEND:-pyav}"
 export LEROBOT_VIDEO_CODEC="${LEROBOT_VIDEO_CODEC:-h264}"
+export TMPDIR="${TMPDIR:-/workspace/runtime/tmp}"
 CONVERSION_JOBS="${CONVERSION_JOBS:-8}"
 LEROBOT_PYTHON="${LEROBOT_PYTHON:-/opt/lerobot-env/bin/python}"
-LOG_ROOT=/tmp/robotwin-lerobot-conversion
-CACHE_ROOT="${CONVERSION_CACHE_ROOT:-/tmp/robotwin-lerobot-cache}"
+RUNTIME_ROOT="${ROBOTWIN_RUNTIME_ROOT:-/workspace/runtime}"
+LOG_ROOT="${CONVERSION_LOG_ROOT:-${RUNTIME_ROOT}/outputs/logs/robotwin-lerobot-conversion}"
+CACHE_ROOT="${CONVERSION_CACHE_ROOT:-${RUNTIME_ROOT}/cache/robotwin-lerobot-cache}"
 MANIFEST=/RoboTwin/data/robotwin_demo_clean_joint_v30.txt
 
-mkdir -p "${HF_LEROBOT_HOME}" "${LOG_ROOT}" "${CACHE_ROOT}"
+mkdir -p "${HF_LEROBOT_HOME}" "${LOG_ROOT}" "${CACHE_ROOT}" "${TMPDIR}"
 mapfile -t tasks < <(
     find data/demo_clean -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
 )
@@ -70,7 +72,7 @@ convert_task() {
 }
 export -f convert_task
 export HF_LEROBOT_HOME LEROBOT_VIDEO_BACKEND LEROBOT_VIDEO_CODEC \
-    LOG_ROOT CACHE_ROOT CONVERTER_KEY LEROBOT_PYTHON
+    TMPDIR LOG_ROOT CACHE_ROOT CONVERTER_KEY LEROBOT_PYTHON
 
 printf '%s\n' "${tasks[@]}" | \
     xargs -r -P "${CONVERSION_JOBS}" -n 1 bash -c 'convert_task "$1"' _

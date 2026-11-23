@@ -252,6 +252,7 @@ inputs/
 *.ncu-rep
 *.nvcudmp
 
-# Keep reproducibility documentation and experiment records, but ignore local
-# Python bytecode generated while running the benchmark helpers.
+# Local experiment outputs and retired notebook caches.
+agent_workspace/
+artifacts/
 notes

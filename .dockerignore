@@ -1,0 +1,8 @@
+.git
+agent_workspace/
+artifacts/
+notes/
+**/__pycache__/
+**/*.pyc
+scripts/data/prepare_external_data.sh
+scripts/data/convert_all_data.sh

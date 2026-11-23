@@ -2,6 +2,11 @@
 
 本仓库用于在 AMD ROCm 环境下复现 LingBot-VLA-v2 与 RoboTwin 的推理、闭环评测、LoRA 训练和全参数 SFT 流程。默认面向 Radeon Cloud 上的 4× 或 8× W7900 实例。
 
+仓库根目录的 `scripts/` 按服务、评测、训练、checkpoint 转换和数据准备用途组织；
+训练 YAML 位于 `configs/`。可在宿主机运行
+`bash scripts/data/prepare_external_data.sh`，准备默认镜像要挂载的资产、
+数据和基础模型。
+
 ## 文档和 Notebook
 
 ### [Reproduce_Guide.md](./Reproduce_Guide.md)
@@ -14,11 +19,11 @@
 - 四卡/八卡 LoRA 训练、checkpoint 合并和评测；
 - 四卡/八卡完整 depth/video teacher 全参数 SFT；
 - DCP checkpoint 转换、模型重新启动和评测；
-- Docker patch 的手动应用方式及各 patch 的作用。
+- [源码补丁](./patches/README.md) 的作用及手动应用方式。
 
 需要复制命令到终端执行，或了解完整环境、参数和排错流程时，以这份文档为准。
 
-### [RoboTwin_ROCm_Reproduction.ipynb](./RoboTwin_ROCm_Reproduction.ipynb)
+### [RoboTwin_ROCm_Reproduction.ipynb](./notebooks/RoboTwin_ROCm_Reproduction.ipynb)
 
 Notebook 是交互式复现入口，与指南中的配置保持同步，按顺序覆盖：
 
@@ -30,11 +35,16 @@ Notebook 是交互式复现入口，与指南中的配置保持同步，按顺�
 
 Notebook 中的长时间训练和全量 benchmark 默认不会自动执行，需要在对应代码单元中手动打开开关，并确认当前实例 GPU 数量、模型数据和持久化目录。Notebook 适合交互式运行、观察日志和复用中间变量；需要一次性、可审计的命令行流程时，请使用复现指南。
 
+### 单任务 workshop
+
+- [LoRA workshop](./notebooks/lora_workshop.ipynb)：自动选择一张空闲 AMD ROCm GPU（如 R9700 或 W7900），用 `click_alarmclock` 的 50 条 clean 示范训练 25 步；clean 和 randomized 各展示 10 个固定 seed 的训练前后结果。
+- [全参数 SFT workshop](./notebooks/sft_workshop.ipynb)：自动选择四张空闲 AMD ROCm GPU，用 `turn_switch` 的 50 条 clean 示范训练 100 步，micro8 × 4 卡 × 累积1 = global32；四张 GPU 并行完成 clean 和 randomized 各 10 个固定 seed 的评测。训练使用 FSDP2 full-shard，不启用 CPU offload，需至少 100 GiB 可用输出空间。
+
 ## 推荐使用顺序
 
 1. 先阅读 [Reproduce_Guide.md](./Reproduce_Guide.md) 的环境、镜像和模型说明。
 2. 按指南完成 Docker 或 Radeon Cloud 实例准备。
-3. 在 JupyterLab 中打开 [RoboTwin_ROCm_Reproduction.ipynb](./RoboTwin_ROCm_Reproduction.ipynb)，按顺序执行检查、smoke test 和所需评测单元。
+3. 在 JupyterLab 中打开 [RoboTwin_ROCm_Reproduction.ipynb](./notebooks/RoboTwin_ROCm_Reproduction.ipynb)，按顺序执行检查、smoke test 和所需评测单元。
 4. 需要正式训练或长时间 benchmark 时，使用 Notebook 中确认过的参数，切换到指南中的命令行入口并将输出写入 `/workspace/runtime`。
 
-默认模型是官方 `robbyant/lingbot-vla-v2-6b` 基础 checkpoint；RoboTwin 后训练 checkpoint 只在显式指定训练后模型进行验证时使用。默认评测使用 MPLib、`expert_check=true`，并在 `play_once` 失败时保留可用的渲染信息继续评测。
+默认模型是官方 `robbyant/lingbot-vla-v2-6b` 基础 checkpoint；RoboTwin 后训练 checkpoint 只在显式指定训练后模型进行验证时使用。默认评测使用 MPLib、`expert_check=true`，跳过 expert 检查失败或环境初始化不稳定的 seed。

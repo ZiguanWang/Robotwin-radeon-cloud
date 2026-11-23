@@ -1,10 +1,16 @@
 diff --git a/deploy/lingbot_vla_v2_policy.py b/deploy/lingbot_vla_v2_policy.py
-index 96b9acb..1856115 100644
 --- a/deploy/lingbot_vla_v2_policy.py
 +++ b/deploy/lingbot_vla_v2_policy.py
-@@ -224,6 +224,18 @@ class LingbotVLAv2Server:
-         self.use_fp32 = use_fp32
-         self.action_key: str= "action"
+@@ -210,3 +210,7 @@
+         apply_lingbot_qwen3_vl_patch()
+-
++        if os.environ.get('ROBOTWIN_WORKSHOP_DISABLE_FUSED_MOE') == '1':
++            from lingbotvla.models.vla.lingbot_vla import qwen2_action_expert
++            qwen2_action_expert.robby_moe_forward = None
++            print('ROBOTWIN_DIAG: robby_moe_forward disabled', flush=True)
++        # Keep this fallback opt-in for paired workshop evaluation.
+         self.vla = self.load_vla(path_to_pi_model)
+@@ -226,2 +230,14 @@
  
 +    @staticmethod
 +    def _is_training_alignment_key(key: str) -> bool:
@@ -19,11 +25,7 @@ index 96b9acb..1856115 100644
 +        ))
 +
      def load_model_weights(self, path_to_pi_model, strict=True):
-         all_safetensors = glob(os.path.join(path_to_pi_model, "*.safetensors"))
-         merged_weights = {}
-@@ -232,6 +244,26 @@ class LingbotVLAv2Server:
-             with safe_open(file_path, framework="pt", device="cpu") as f:
-                 for key in f.keys():
+@@ -234,2 +250,22 @@
                      merged_weights[key] = f.get_tensor(key)
 +        inference_keys = set(self.vla.state_dict())
 +        training_only_keys = {
@@ -46,11 +48,7 @@ index 96b9acb..1856115 100644
 +                if key not in training_only_keys
 +            }
          self.vla.load_state_dict(merged_weights, strict=strict)
- 
-     def merge_qwen_config(self, qwen_config):
-@@ -273,7 +273,21 @@ class LingbotVLAv2Server:
-         print(f"loading model from: {path_to_pi_model}")
-         
+@@ -275,3 +311,17 @@
          # load training config
 -        training_config_path = Path(path_to_pi_model).parent.parent.parent/'lingbotvla_cli.yaml'
 +        configured_path = os.environ.get('LINGBOTVLA_TRAINING_CONFIG')
@@ -69,18 +67,18 @@ index 96b9acb..1856115 100644
 +            searched = ', '.join(str(candidate) for candidate in candidate_paths if candidate)
 +            raise FileNotFoundError(f'No LingBot-VLA training config found; searched: {searched}')
          with open(training_config_path, 'r') as f:
-             training_config = yaml.safe_load(f)
-         f.close()
-@@ -288,6 +302,9 @@ class LingbotVLAv2Server:
- 
-         # Set attention_implementation to 'eager' to speed up evaluation.
+@@ -290,2 +340,5 @@
          config.attention_implementation = 'eager'
 +        # The official checkpoint enables a single-shape ViT cache. Disable it
 +        # for the websocket server so one process can serve variable env batches.
 +        config.precompute_grid_thw = False
          
-         # set base model according to training config
-         training_base_model = training_config['model']['tokenizer_path']
+@@ -466,2 +519,5 @@
+         if 'reset' in observation and observation['reset']:
++            if 'seed' in observation:
++                set_seed_everywhere(int(observation['seed']))
++                print(f"policy_episode_seed={int(observation['seed'])}", flush=True)
+             self.reset(robo_name=observation['robo_name'], path_to_pi_model=observation['path_to_pi_model'] if 'path_to_pi_model' in observation else None)
 diff --git a/lingbotvla/data/vla_data/base_dataset.py b/lingbotvla/data/vla_data/base_dataset.py
 index 71d62a0..30f121f 100644
 --- a/lingbotvla/data/vla_data/base_dataset.py
@@ -290,4 +288,15 @@ index a4427fe..2cbb02c 100644
      use_depth_align = True if args.train.align_params != {} else False
      use_future_depth = args.train.align_params.get('depth', {}).get('use_future_depth', False)
      use_future_video = use_depth_align and args.train.align_params.get('use_future_video', False)
-
+diff --git a/lingbotvla/models/vla/lingbot_vla/qwen2_action_expert.py b/lingbotvla/models/vla/lingbot_vla/qwen2_action_expert.py
+--- a/lingbotvla/models/vla/lingbot_vla/qwen2_action_expert.py
++++ b/lingbotvla/models/vla/lingbot_vla/qwen2_action_expert.py
+@@ -21,6 +21,8 @@
+     auto_docstring
+ )
+ from transformers.utils.deprecation import deprecate_kwarg
++
++logger = logging.get_logger(__name__)
+ from transformers.activations import ACT2FN
+ from transformers.modeling_attn_mask_utils import AttentionMaskConverter
+ from transformers.modeling_flash_attention_utils import FlashAttentionKwargs, is_flash_attn_available

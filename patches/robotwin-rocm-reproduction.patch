@@ -1,3 +1,16 @@
+diff --git a/envs/camera/camera.py b/envs/camera/camera.py
+--- a/envs/camera/camera.py
++++ b/envs/camera/camera.py
+@@ -76,8 +76,8 @@ class Camera:
+     def load_camera(self, scene):
+         """
+         Add cameras and set camera parameters
+             - Including four cameras: left, right, front, head.
+         """
+-        near, far = 0.1, 100
++        near, far = float(os.environ.get("ROBOTWIN_CAMERA_NEAR", "0.1")), 100
+         camera_config_path = os.path.join(CONFIGS_PATH, "_camera_config.yml")
+
 diff --git a/envs/_base_task.py b/envs/_base_task.py
 index 301da9f..6a46535 100644
 --- a/envs/_base_task.py
@@ -207,17 +220,10 @@ index 9dfc08f..d90ec9f 100644
              self.right_conn.send({
                  "cmd": "plan_path",
 diff --git a/scripts/eval_policy_xpolicylab.py b/scripts/eval_policy_xpolicylab.py
-index a0e5614..f659cb4 100644
+index 745cc30..de0f718 100644
 --- a/scripts/eval_policy_xpolicylab.py
 +++ b/scripts/eval_policy_xpolicylab.py
-@@ -3,12 +3,14 @@ from __future__ import annotations
- import argparse
- import ast
- import copy
-+import json
- import importlib
- import multiprocessing as mp
- import os
+@@ -9,6 +9,7 @@ import os
  import queue
  import subprocess
  import sys
@@ -225,7 +231,7 @@ index a0e5614..f659cb4 100644
  import traceback
  from collections.abc import Mapping, Sequence
  from datetime import datetime
-@@ -85,6 +87,18 @@ def build_policy_client(usr_args: dict[str, Any]):
+@@ -85,6 +86,18 @@ def build_policy_client(usr_args: dict[str, Any]):
      host = usr_args.get("host") or usr_args.get("policy_server_host") or "localhost"
      port = usr_args.get("port") or usr_args.get("policy_server_port")
  
@@ -244,7 +250,7 @@ index a0e5614..f659cb4 100644
      if protocol == "ws":
          from client_server.ws import WsModelClient
  
-@@ -174,6 +188,10 @@ def load_task_args(usr_args: dict[str, Any]) -> tuple[dict[str, Any], str]:
+@@ -174,6 +187,10 @@ def load_task_args(usr_args: dict[str, Any]) -> tuple[dict[str, Any], str]:
      args["task_config"] = task_config
      args["ckpt_setting"] = ckpt_setting
      args["policy_name"] = usr_args["policy_name"]
@@ -255,7 +261,7 @@ index a0e5614..f659cb4 100644
      ensure_xpolicylab_observation_flags(args)
  
      embodiment_type = args.get("embodiment")
-@@ -302,7 +320,7 @@ def main(usr_args: dict[str, Any]) -> None:
+@@ -302,7 +319,7 @@ def main(usr_args: dict[str, Any]) -> None:
      usr_args["right_arm_dim"] = len(args["right_embodiment_config"]["arm_joints_name"][1])
  
      seed = int(usr_args["seed"])
@@ -264,7 +270,7 @@ index a0e5614..f659cb4 100644
      test_num = int(usr_args.get("test_num", 100))
  
      model_client = build_policy_client(usr_args)
-@@ -362,7 +380,7 @@ def main_batch(usr_args: dict[str, Any]) -> None:
+@@ -362,7 +379,7 @@ def main_batch(usr_args: dict[str, Any]) -> None:
          print_config(args, embodiment_name)
  
      seed = int(usr_args["seed"])
@@ -273,7 +279,7 @@ index a0e5614..f659cb4 100644
      test_num = int(usr_args.get("test_num") or 100)
      requested_workers = int(usr_args.get("num_workers") or 1)
      worker_num = max(1, min(requested_workers, test_num))
-@@ -685,6 +703,7 @@ def run_one_batch_episode(
+@@ -690,6 +707,7 @@ def run_one_batch_episode(
          task_env._set_eval_video_ffmpeg(ffmpeg)
  
      succ = False
@@ -281,7 +287,7 @@ index a0e5614..f659cb4 100644
      prepare_policy_case(model_client, task_name, seed_value, instruction, action_type)
      reset_policy(model_client)
      try:
-@@ -698,7 +717,9 @@ def run_one_batch_episode(
+@@ -703,7 +721,9 @@ def run_one_batch_episode(
                  task_env=task_env,
              )
              model_client.call(func_name="update_obs", obs=xpl_obs)
@@ -291,7 +297,7 @@ index a0e5614..f659cb4 100644
              if len(action_chunk) == 0:
                  raise RuntimeError("Policy returned an empty action chunk.")
  
-@@ -737,6 +758,14 @@ def run_one_batch_episode(
+@@ -742,6 +762,14 @@ def run_one_batch_episode(
  
      notify_trial_end(model_client, task_name, seed_value, succ)
  
@@ -306,7 +312,7 @@ index a0e5614..f659cb4 100644
      task_env.close_env()
      if task_env.render_freq:
          task_env.viewer.close()
-@@ -747,6 +776,8 @@ def run_one_batch_episode(
+@@ -752,6 +780,8 @@ def run_one_batch_episode(
          "worker_id": worker_id,
          "seed": seed_value,
          "success": bool(succ),
@@ -315,105 +321,10 @@ index a0e5614..f659cb4 100644
      }
  
  
-@@ -766,6 +797,9 @@ def eval_remote_policy(
-     print(f"\033[34mPolicy Name: {args['policy_name']}\033[0m")
- 
-     expert_check = parse_bool(usr_args.get("expert_check", True))
-+    accept_expert_info = parse_bool(
-+        usr_args.get("accept_expert_info_on_failure", True)
-+    )
-     frequency = int(usr_args.get("frequency", usr_args.get("ctrl_freq", 30)))
-     action_type = str(usr_args.get("action_type", "joint"))
- 
-@@ -784,23 +818,58 @@ def eval_remote_policy(
-         episode_info = {"info": {}}
- 
-         if expert_check:
-+            expert_plan_success = False
-+            expert_task_success = False
-+            expert_error = None
-             try:
-                 task_env.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
-                 episode_info = task_env.play_once()
-+                expert_plan_success = bool(task_env.plan_success)
-+                expert_task_success = bool(task_env.check_success())
-+                output_path = usr_args.get("episode_info_output")
-+                if output_path:
-+                    output_path = Path(output_path)
-+                    output_path.parent.mkdir(parents=True, exist_ok=True)
-+                    record = {
-+                        "task_name": task_name,
-+                        "task_config": args["task_config"],
-+                        "seed": now_seed,
-+                        "plan_success": expert_plan_success,
-+                        "task_success": expert_task_success,
-+                        "info": episode_info.get("info", {}),
-+                        "episode_info": episode_info,
-+                    }
-+                    with output_path.open("a", encoding="utf-8") as output_file:
-+                        output_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-                 task_env.close_env()
--            except UnStableError:
-+            except UnStableError as exc:
-+                expert_error = {"type": type(exc).__name__, "message": str(exc)}
-+                try:
-+                    episode_info = {"info": {}, "render_observation": task_env.get_obs()}
-+                except Exception:
-+                    episode_info = {"info": {}}
-                 task_env.close_env()
--                now_seed += 1
--                args["render_freq"] = render_freq
--                continue
-+                if not accept_expert_info:
-+                    now_seed += 1
-+                    continue
-             except Exception as e:
-+                expert_error = {"type": type(e).__name__, "message": str(e)}
-+                try:
-+                    episode_info = {"info": {}, "render_observation": task_env.get_obs()}
-+                except Exception:
-+                    episode_info = {"info": {}}
-                 task_env.close_env()
--                now_seed += 1
--                args["render_freq"] = render_freq
--                print(f"error occurs during expert check! seed={now_seed - 1} err={type(e).__name__}: {e}")
--                continue
--
--        if (not expert_check) or (task_env.plan_success and task_env.check_success()):
-+                if not accept_expert_info:
-+                    now_seed += 1
-+                    args["render_freq"] = render_freq
-+                    print(f"error occurs during expert check! seed={now_seed - 1} err={type(e).__name__}: {e}")
-+                    continue
-+
-+        if (
-+            (not expert_check)
-+            or accept_expert_info
-+            or (expert_plan_success and expert_task_success)
-+        ):
-             succ_seed += 1
-         else:
-             now_seed += 1
-@@ -808,7 +877,14 @@ def eval_remote_policy(
-             continue
- 
-         args["render_freq"] = render_freq
--        task_env.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
-+        try:
-+            task_env.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
-+        except UnStableError:
-+            task_env.close_env()
-+            if not expert_check:
-+                succ_seed -= 1
-+            now_seed += 1
-+            continue
- 
-         instruction = build_instruction(args, episode_info, instruction_type, test_num)
-         task_env.set_instruction(instruction=instruction)
-@@ -843,11 +919,38 @@ def eval_remote_policy(
-             task_env._set_eval_video_ffmpeg(ffmpeg)
- 
+@@ -876,11 +906,39 @@ def eval_remote_policy(
          succ = False
+         rollout_steps = 0
+         rollout_failed = False
 -        prepare_policy_case(model_client, task_name, now_seed, instruction, action_type)
 -        reset_policy(model_client)
 +        inference_latencies = []
@@ -440,6 +351,7 @@ index a0e5614..f659cb4 100644
 +                    action_chunk = normalize_action_chunk(response["action"])
 +                    for action in action_chunk:
 +                        task_env.take_action(np.asarray(action, dtype=np.float32))
++                        rollout_steps += 1
 +                        if task_env.eval_success:
 +                            succ = True
 +                            break
@@ -451,7 +363,7 @@ index a0e5614..f659cb4 100644
                  xpl_obs = robotwin_obs_to_xpolicylab(
                      observation,
                      instruction=task_env.get_instruction(),
-@@ -856,7 +959,9 @@ def eval_remote_policy(
+@@ -889,7 +947,9 @@ def eval_remote_policy(
                      task_env=task_env,
                  )
                  model_client.call(func_name="update_obs", obs=xpl_obs)
@@ -461,7 +373,7 @@ index a0e5614..f659cb4 100644
                  if len(action_chunk) == 0:
                      raise RuntimeError("Policy returned an empty action chunk.")
  
-@@ -893,7 +998,16 @@ def eval_remote_policy(
+@@ -928,7 +988,16 @@ def eval_remote_policy(
          if task_env.eval_video_path is not None:
              task_env._del_eval_video_ffmpeg()
  
@@ -477,9 +389,9 @@ index a0e5614..f659cb4 100644
 +                f"p95_s={np.percentile(values, 95):.4f} total_s={values.sum():.4f}"
 +            )
  
-         if succ:
-             task_env.suc += 1
-@@ -921,19 +1035,37 @@ def eval_remote_policy(
+         if rollout_failed and rollout_steps == 0 and not succ:
+             # Env broke before the policy could act (e.g. renderer buffer errors).
+@@ -975,19 +1044,37 @@ def eval_remote_policy(
  
  
  def build_instruction(args: dict[str, Any], episode_info: dict[str, Any], instruction_type: str | None, test_num: int) -> str:
@@ -525,7 +437,7 @@ index a0e5614..f659cb4 100644
  
  
  def reset_policy(model_client) -> None:
-@@ -1280,16 +1412,19 @@ def parse_args() -> dict[str, Any]:
+@@ -1334,12 +1421,13 @@ def parse_args() -> dict[str, Any]:
      parser.add_argument("--policy_name", required=True)
      parser.add_argument("--host", default="localhost")
      parser.add_argument("--port", required=True)
@@ -540,13 +452,7 @@ index a0e5614..f659cb4 100644
      parser.add_argument("--task_config", default="demo_clean")
      parser.add_argument("--test_num", type=int, default=None)
      parser.add_argument("--instruction_type", choices=("seen", "unseen"))
-     parser.add_argument("--expert_check", default=None)
-+    parser.add_argument("--accept_expert_info_on_failure", default=None)
-+    parser.add_argument("--episode_info_output", default=None)
-     parser.add_argument("--frequency", type=int, default=None)
-     parser.add_argument("--num_workers", type=int, default=None)
-     parser.add_argument("--max_seed_attempts", type=int, default=None)
-@@ -1311,11 +1446,17 @@ def parse_args() -> dict[str, Any]:
+@@ -1365,6 +1453,8 @@ def parse_args() -> dict[str, Any]:
          "xpolicylab_root": str(Path(args.root_dir).resolve() / "XPolicyLab"),
          "eval_batch": parse_bool(args.eval_batch),
      }
@@ -555,12 +461,10 @@ index a0e5614..f659cb4 100644
  
      if args.test_num is not None:
          usr_args["test_num"] = args.test_num
-     if args.expert_check is not None:
-         usr_args["expert_check"] = parse_bool(args.expert_check)
-+    if args.accept_expert_info_on_failure is not None:
-+        usr_args["accept_expert_info_on_failure"] = parse_bool(args.accept_expert_info_on_failure)
-+    if args.episode_info_output is not None:
-+        usr_args["episode_info_output"] = args.episode_info_output
-     if args.frequency is not None:
-         usr_args["frequency"] = args.frequency
-     if args.num_workers is not None:
+@@ -1380,4 +1470,6 @@ def parse_args() -> dict[str, Any]:
+     usr_args.update(parse_additional_info(args.additional_info))
+     usr_args.setdefault("ckpt_setting", usr_args.get("ckpt_name"))
+     usr_args.setdefault("action_type", "joint")
++    if usr_args["protocol"] == "lingbot_vla_v2" and usr_args["eval_batch"]:
++        parser.error("LingBot websocket evaluation uses --eval_batch false")
+     return usr_args

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Full-parameter SFT smoke/production launcher for LingBot-VLA-v2.
-# GPU_COUNT supports 4 or 8 and defaults to 4. Unless explicitly
+# GPU_COUNT supports 1, 4, or 8 and defaults to 4. Unless explicitly
 # overridden, gradient accumulation is derived from the requested global batch,
 # GPU count, and per-rank micro batch size.
 
@@ -21,13 +21,19 @@ GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-256}"
 OPTIMIZER="${OPTIMIZER:-adamw}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
+PIN_MEMORY="${PIN_MEMORY:-true}"
+IMAGE_AUGMENT="${IMAGE_AUGMENT:-false}"
+ENABLE_FORWARD_PREFETCH="${ENABLE_FORWARD_PREFETCH:-true}"
+EMPTY_CACHE_STEPS="${EMPTY_CACHE_STEPS:-500}"
+SFT_LR="${SFT_LR:-}"
 TEACHER_MODE="${TEACHER_MODE:-full}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-0}"
+MOE_IMPLEMENTATION="${MOE_IMPLEMENTATION:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-/workspace/runtime/outputs/full_sft_${GPU_COUNT}gpu_${MAX_STEPS}steps}"
 DATA_LIST="${DATA_LIST:-${ROBOTWIN_ROOT}/data/robotwin_demo_clean_joint_v30.txt}"
 CONFIG="${CONFIG:-${ROBOTWIN_ROOT}/experiments/lingbot_vla_v2_6b_robotwin/training/lingbotvla_cli.yaml}"
 
-SOURCE_DIR="${ROBOTWIN_ROOT}/experiments/lingbot_vla_v2_6b_robotwin/source/lingbot-vla-v2"
+SOURCE_DIR="${SOURCE_DIR:-${ROBOTWIN_ROOT}/experiments/lingbot_vla_v2_6b_robotwin/source/lingbot-vla-v2}"
 MODEL_ROOT="${ROBOTWIN_ROOT}/experiments/lingbot_vla_v2_6b_robotwin/models"
 BASE_MODEL="${MODEL_ROOT}/robbyant_lingbot-vla-v2-6b"
 TOKENIZER_PATH="${MODEL_ROOT}/Qwen3-VL-4B-Instruct-config-tokenizer"
@@ -35,10 +41,14 @@ MOGE_PATH="${MODEL_ROOT}/moge-2-vitb-normal/model.pt"
 LINGBOT_DEPTH_PATH="${BASE_MODEL}/depth/model.pt"
 DINO_VIDEO_PATH="${BASE_MODEL}/dino_video/teacher_step_10000.pth"
 DINO_VIDEO_CONFIG="${BASE_MODEL}/dino_video/config.yaml"
-LOG_DIR="/workspace/runtime/outputs/logs"
+LOG_DIR="${LOG_DIR:-/workspace/runtime/outputs/logs}"
 LOG_FILE="${LOG_FILE:-${LOG_DIR}/full_sft_${GPU_COUNT}gpu_${MAX_STEPS}steps.log}"
 
 case "${GPU_COUNT}" in
+  1)
+    DEFAULT_GPU_IDS="0"
+    DEFAULT_MICRO_BATCH_SIZE=1
+    ;;
   4)
     DEFAULT_GPU_IDS="0,1,2,3"
     DEFAULT_MICRO_BATCH_SIZE=16
@@ -48,7 +58,7 @@ case "${GPU_COUNT}" in
     DEFAULT_MICRO_BATCH_SIZE=16
     ;;
   *)
-    echo "GPU_COUNT must be 4 or 8; got ${GPU_COUNT}" >&2
+    echo "GPU_COUNT must be 1, 4, or 8; got ${GPU_COUNT}" >&2
     exit 2
     ;;
 esac
@@ -109,7 +119,7 @@ if grep -q '/workspace/RoboTwin/' "${DATA_LIST}"; then
 fi
 
 export HIP_VISIBLE_DEVICES="${GPU_IDS}"
-unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
+unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL HSA_OVERRIDE_GFX_VERSION
 
 cd "${SOURCE_DIR}"
 TRAIN_COMMAND=(
@@ -120,7 +130,8 @@ TRAIN_COMMAND=(
   "${CONFIG}" \
   --data.train_path "${DATA_LIST}" \
   --data.num_workers "${NUM_WORKERS}" \
-  --data.prefetch_factor "${PREFETCH_FACTOR}" \
+  --data.pin_memory "${PIN_MEMORY}" \
+  --data.image_augment "${IMAGE_AUGMENT}" \
   --train.output_dir "${OUTPUT_DIR}" \
   --train.optimizer "${OPTIMIZER}" \
   --train.use_lora false \
@@ -132,14 +143,33 @@ TRAIN_COMMAND=(
   --train.gradient_accumulation_steps "${GRADIENT_ACCUMULATION_STEPS}" \
   --train.global_batch_size "${GLOBAL_BATCH_SIZE}" \
   --train.enable_gradient_checkpointing true \
+  --train.enable_mixed_precision true \
   --train.enable_fsdp_offload "${ENABLE_FSDP_OFFLOAD}" \
   --train.enable_activation_offload "${ENABLE_ACTIVATION_OFFLOAD}" \
   --train.activation_gpu_limit "${ACTIVATION_GPU_LIMIT}" \
   --train.enable_full_shard "${ENABLE_FULL_SHARD}" \
+  --train.enable_forward_prefetch "${ENABLE_FORWARD_PREFETCH}" \
+  --train.empty_cache_steps "${EMPTY_CACHE_STEPS}" \
   --train.enable_resume false \
   --train.max_steps "${MAX_STEPS}" \
   --train.save_steps "${SAVE_STEPS}"
 )
+if (( NUM_WORKERS > 0 )); then
+  TRAIN_COMMAND+=(--data.prefetch_factor "${PREFETCH_FACTOR}")
+fi
+if [[ -n "${SFT_LR}" ]]; then
+  TRAIN_COMMAND+=(--train.lr "${SFT_LR}")
+fi
+if [[ -n "${MOE_IMPLEMENTATION}" ]]; then
+  case "${MOE_IMPLEMENTATION}" in
+    eager|fused) ;;
+    *)
+      echo "MOE_IMPLEMENTATION must be eager or fused; got ${MOE_IMPLEMENTATION}" >&2
+      exit 2
+      ;;
+  esac
+  TRAIN_COMMAND+=(--model.moe_implementation "${MOE_IMPLEMENTATION}")
+fi
 if [[ -n "${ALIGN_PARAMS}" ]]; then
   TRAIN_COMMAND+=(
     --model.model_path "${BASE_MODEL}"

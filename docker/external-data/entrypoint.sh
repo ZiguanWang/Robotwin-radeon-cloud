@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+source /usr/local/bin/robotwin-env
+
 PERSISTENT_ROOT=/models/robotwin-persistent
 required_paths=(
   "${PERSISTENT_ROOT}/assets/objects/objaverse/list.json"
@@ -21,6 +23,7 @@ done
 mkdir -p \
   /workspace/runtime/eval_result \
   /workspace/runtime/outputs \
-  /workspace/runtime/.cache/huggingface
+  /workspace/runtime/.cache/huggingface \
+  /workspace/runtime/tmp
 
 exec "$@"

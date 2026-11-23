@@ -5,9 +5,11 @@
 | 组件 | 版本或提交 |
 |---|---|
 | 基础镜像 | `rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1` |
-| 完整镜像 | `robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1` |
-| RoboTwin | `266f3aadf505a4f7fe9af0faa41a20f5f47cd123` |
-| XPolicyLab | `c37109c500be67d0dea6b36bf7337bbd26e763cd` |
+| 默认镜像 | `robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1` |
+| FlashAttention2 | Dao-AILab `9c6d9297e5d43653c2ea5837ed9e0d10f76ed231`（PR #2900） |
+| RoboTwin | `e154702de28cac4b9bfe0299044303f507236bb3` |
+| RoboTwin 子模块 XPolicyLab | `c37109c500be67d0dea6b36bf7337bbd26e763cd` |
+| SAPIEN | `3.0.0b1` |
 | LingBot-VLA-v2 | `951475ae1b1d87553e7dc47c97b53a3d695c0d13` |
 | 官方基础模型 revision | `11c703bf6a5c1f45b3b69168482da11fdbba53d7` |
 | Qwen 配置 revision | `ebb281ec70b05090aa6165b016eac8ec08e71b17` |
@@ -16,28 +18,44 @@
 | PyTorch / ROCm | 2.9.1 / 7.2.1 |
 | LeRobot | 0.6.0 |
 
+RoboTwin `e154702...` 修复了不稳定 seed 的有效 episode 计数。镜像使用该提交
+及其固定的 XPolicyLab 子模块版本；兼容补丁让 RoboTwin 的评测脚本连接 LingBot
+模型服务。
+
 AMD 环境关闭 CuRobo，使用 MPLib 做末端位姿规划。闭环结果应注明
 `ROCm + MPLib + expert_check=true`，不要直接与 CUDA/CuRobo 结果比较。
 
+AMD 计算设备使用 `HIP_VISIBLE_DEVICES`，SAPIEN 渲染设备使用 `DRI_PRIME`。
+评测脚本会自动设置后者；不要同时设置 `ROCR_VISIBLE_DEVICES`、
+`CUDA_VISIBLE_DEVICES` 或 `GPU_DEVICE_ORDINAL`。
+
+单任务和多任务评测都调用 RoboTwin 的 `scripts/eval_policy_xpolicylab.py`；
+多任务脚本 `run_robotwin_benchmark.py` 负责启动模型服务和分配 GPU。它默认使用
+FP32 推理、expert seed 筛选和任务配置中的指令类别。正式评测每任务运行
+100 次有效 rollout；`--episodes 10` 可用于短程检查。例如在容器内：
+
+```bash
+python /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/scripts/eval/run_robotwin_benchmark.py \
+  --model-path /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/models/robbyant_lingbot-vla-v2-6b \
+  --task-config demo_clean --episodes 100 --gpu-count 4
+```
+
+记录结果时请注明 RoboTwin `e154702...`、SAPIEN `3.0.0b1`、ROCm/MPLib
+及评测配置；与旧版 LingBot 客户端的结果比较时，应核对这些条件。
+
 # 第一部分：使用构建好的 Docker 镜像
 
-full 和 external-data 镜像包含相同的源码、兼容补丁及 Python 环境，后续推理、
-评测和训练命令完全相同。两者只在大型数据的保存位置上有区别：
+默认镜像使用固定版本的 RoboTwin、XPolicyLab 与 LingBot 源码。仿真资产、模型和
+训练数据位于宿主机 `/models/robotwin-persistent`，启动容器时挂载 `/models`。
 
-| 镜像 | 仿真资产、模型和训练数据 | 启动时的数据挂载 |
-|---|---|---|
-| full | 全部内置在镜像中 | 不需要 |
-| external-data | 位于外置数据目录 | `/models` 挂载后在 `/models/robotwin-persistent` 可用 |
-
-两个镜像中的公共运行路径为：
+镜像中的运行路径为：
 
 ```text
 /RoboTwin                   源码和默认工作目录
 /RoboTwin/data/demo_clean   50 个任务的原始解压数据
 /RoboTwin/data/lerobot      转换完成的 LeRobot v3 数据
 /workspace/runtime          日志、评测结果和训练 checkpoint
-/opt/robotwin-env           推理、训练和评测环境
-/opt/lerobot-env            LeRobot v3 数据转换环境
+/opt/robotwin-env           推理、训练、评测、LeRobot v3 读取和 Jupyter 环境
 ```
 
 Radeon Cloud Global 当前的持久化 `/workspace` 空间只有 100 GB。启动训练或评测前，
@@ -55,29 +73,7 @@ du -d1 -h /workspace/runtime/outputs
 
 ## 1. 构建镜像
 
-### 1.1 full 镜像
-
-full 镜像包含仿真资产、官方模型、Qwen tokenizer/config、全部 50 个任务的解压
-数据和转换完成的 LeRobot v3 数据，启动后不需要下载或转换。在仓库根目录执行：
-
-```bash
-chmod +x docker/full/build.sh
-./docker/full/build.sh
-```
-
-默认生成：
-
-```text
-robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1
-```
-
-构建使用持久 BuildKit cache 保存 apt 包、pip wheels、仿真资产压缩包、模型权重、
-50 个原始数据 ZIP，以及按任务划分的 LeRobot 转换结果。这些缓存不会进入最终
-镜像；不要在频繁重建期间执行 `docker builder prune`。
-
-### 1.2 external-data 镜像
-
-external-data 镜像不包含大型资产、数据和模型，它们必须位于宿主机：
+镜像不包含大型资产、数据和模型，它们必须位于宿主机：
 
 ```text
 /models/robotwin-persistent/
@@ -93,46 +89,42 @@ chmod +x docker/external-data/build.sh
 ./docker/external-data/build.sh
 ```
 
-默认生成：
+在宿主机准备镜像需要挂载的资产、50 个任务的数据和基础模型。
+此步骤不依赖上述镜像，镜像构建可在数据准备前后进行：
 
-```text
-robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1-external-data
+```bash
+bash scripts/data/prepare_external_data.sh
 ```
+
+脚本直接在宿主机下载固定 revision，按需安装 Python 依赖并转换 LeRobot v3 数据，
+结果固定写入 `/models/robotwin-persistent/`；源码、隔离环境、缓存和转换日志存放在
+`.preparation_runtime/`。可先加 `--dry-run` 查看步骤，不开始下载。
+
+默认生成 `robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1`。
 
 容器内的 `assets`、`data` 和 `models` 使用软链接指向上述挂载目录，因此后续命令
 无需修改路径。entrypoint 会检查资产、50 任务训练清单和模型索引，未挂载或内容
 不完整时会直接报出缺失路径。
 
-如需覆盖镜像名或 pip 源，两个构建脚本均支持：
+如需覆盖镜像名或 pip 源：
 
 ```bash
 IMAGE_NAME=my-registry/robotwin-lingbot:v1 \
 PIP_INDEX_URL=https://pypi.org/simple \
-./docker/full/build.sh
+./docker/external-data/build.sh
 ```
 
 ## 2. 启动容器
 
 ### 2.1 本地 Docker
 
-先根据镜像类型设置变量。
-
-使用 full 镜像：
+设置默认镜像和数据挂载：
 
 ```bash
 IMAGE=robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1
-DATA_MOUNTS=()
 ```
 
-使用 external-data 镜像：
-
-```bash
-IMAGE=robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1-external-data
-DATA_MOUNTS=(-v /models:/models)
-```
-
-然后使用同一条命令启动，两种镜像的容器名都固定为
-`robotwin-lingbot-vla-v2`：
+启动容器：
 
 ```bash
 mkdir -p /workspace/robotwin-runtime
@@ -146,13 +138,13 @@ docker run --name robotwin-lingbot-vla-v2 \
   --security-opt seccomp=unconfined \
   --cap-add=SYS_PTRACE \
   --network=host \
-  "${DATA_MOUNTS[@]}" \
+  -v /models:/models \
   -v /workspace/robotwin-runtime:/workspace/runtime \
   -it "$IMAGE" \
   bash
 ```
 
-`/workspace/runtime` 对两种镜像都是普通目录。上述挂载用于持久化评测结果、
+`/workspace/runtime` 是普通目录。上述挂载用于持久化评测结果、
 训练 checkpoint、日志和 Hugging Face 缓存；如果不需要在删除容器后保留输出，
 可以删除该 `-v` 参数。宿主机挂载目录的权限由宿主机负责。
 
@@ -167,10 +159,10 @@ docker exec -it robotwin-lingbot-vla-v2 bash
 
 当前需要在 [Radeon Cloud Global](https://radeon-global.anruicloud.com/) 上验证。云端
 操作参考 [Radeon Cloud User Guide](https://github.com/AMD-DEV-CONTEST/Embodied-AI-Challenge-AMD-Platform-2026-09/blob/main/Radeon-Cloud-User-Guide/README.md)。
-Radeon Cloud 使用本项目构建并上传到镜像仓库的 **external-data 镜像**：
+Radeon Cloud 使用本项目构建并上传到镜像仓库的**默认镜像**：
 
 ```text
-robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1-external-data
+robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1
 ```
 
 1. 登录 Radeon Cloud。登录后默认进入 **Classic** 风格界面；点击页面右下角的
@@ -181,11 +173,10 @@ robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1-exter
 2. 在实例配置页面点击 **Customize**，根据需要选择 **4 GPUs** 或 **8 GPUs**；在
    **Image** 中选择 **robotwin**，在 **Resource Pool** 中选择本次比赛对应的资源池 **Dev**，
    在 **Workspace Storage** 中选择 **Persistent /workspace**，最后在 **Mount a model**
-   中选择 **Devzone**。如果没有选择 Devzone，实例内不会挂载 external-data 镜像所需的数据。
+   中选择 **Devzone**。如果没有选择 Devzone，实例内不会挂载镜像所需的数据。
 3. 选择 **Persistent /workspace** 后，训练 checkpoint、日志和评测结果会保存在持久化
    workspace 中；选择 **Devzone** 后，平台后台会把相应内容挂载到 `/models`，用户不需要手动
-   挂载。external-data
-   所需内容位于其中的 `/models/robotwin-persistent`，目录结构为：
+   挂载。镜像所需内容位于其中的 `/models/robotwin-persistent`，目录结构为：
 
    每次运行前后都应检查 `/workspace` 的剩余空间。LoRA 和 Full-SFT checkpoint 可能占用
    数十 GB；不再需要的旧 LoRA 结果和中间输出应及时清理。若临时将中间结果放在根盘，
@@ -215,10 +206,10 @@ robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1-exter
    ```
 
    然后刷新左侧文件列表，进入 `RoboTwin` 文件夹操作。该目录是指向镜像内
-   `/RoboTwin` 的软链接，不会复制源码。external-data 镜像还内置了交互式入口：
+   `/RoboTwin` 的软链接，不会复制源码。镜像还内置了交互式入口：
 
    ```text
-   /RoboTwin/RoboTwin_ROCm_Reproduction.ipynb
+   /RoboTwin/notebooks/RoboTwin_ROCm_Reproduction.ipynb
    ```
 
    可在 JupyterLab 中打开该文件，依次完成挂载/GPU 检查、启动端口号为 13400 的模型服务、
@@ -238,7 +229,7 @@ robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1-exter
      /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/models
    ```
 
-   `/RoboTwin` 已经内置于 external-data 镜像，不需要重新 clone，也不
+   `/RoboTwin` 已经内置于镜像，不需要重新 clone，也不
    需要手工建立该目录；资产、数据和模型由镜像中的软链接映射到后台挂载目录。
 6. 云端实例中不要再启动第二层 Docker。执行以下检查以及第 3 节自检，确认实例
    已暴露 AMD GPU：
@@ -250,10 +241,21 @@ robotwin-lingbot-vla-v2:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1-exter
 
 ## 3. 环境和镜像内容检查
 
-full 和 external-data 镜像都已经通过 Dockerfile 的 `ENV` 持久设置
-`AITER_TRITON_ONLY=1` 和 `FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE`，因此进入新 shell 后
-不需要手工重复设置。前者避免 AITER 顶层导入当前任务不需要且要求更高 Triton 版本的
-Gluon/AOT 算子，后者使 FlashAttention2 使用 AMD Triton kernel。
+默认镜像通过 Dockerfile 的 `ENV` 全局设置运行变量；容器入口
+也会加载 `/usr/local/bin/robotwin-env`，登录 shell 可通过 `/etc/profile.d/robotwin-env.sh`
+加载同一配置：
+
+- `AITER_TRITON_ONLY=1`：让 AITER 使用当前环境支持的 Triton 算子路径。
+- `FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE`：启用 FlashAttention2 的 AMD Triton 实现。
+- `PYTHONPATH=/opt/aiter`：让 Python 找到 AITER 源码。
+- `TMPDIR=/workspace/runtime/tmp`：存放运行时临时文件。
+- `HF_HOME=/workspace/runtime/.cache/huggingface`：存放 Hugging Face 缓存。
+
+在容器内查看当前值：
+
+```bash
+env | grep -E '^(AITER_TRITON_ONLY|FLASH_ATTENTION_TRITON_AMD_ENABLE|PYTHONPATH|TMPDIR|HF_HOME)='
+```
 
 ```bash
 pwd
@@ -278,11 +280,11 @@ PY
 
 三个 Git commit 应依次与本文开头的固定版本一致。
 
-## 4. 检查内置训练数据
+## 4. 检查挂载的训练数据
 
-镜像构建时下载固定 revision 的全部 50 个 `demo_clean.zip`，解压后立即删除 ZIP，
-然后并行转换为 50 个独立的 `<task>_joint_v30` LeRobot 数据集。训练清单包含
-全部数据集。容器启动后只需检查：
+宿主机准备脚本下载固定 revision 的 50 个 `demo_clean.zip`，并将数据转换为
+50 个独立的 `<task>_joint_v30` LeRobot 数据集。训练清单包含全部数据集。
+挂载数据并启动容器后检查：
 
 ```bash
 test "$(find /RoboTwin/data/demo_clean -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 50
@@ -298,11 +300,12 @@ du -sch /RoboTwin/data/lerobot/* | tail -1
 清单，不是同名数据集目录；具体任务目录命名为 `<task>_joint_v30`，例如
 `adjust_bottle_joint_v30`。
 
-`/RoboTwin/eval_result` 链接到 `/workspace/runtime/eval_result`；训练
-checkpoint 和日志也写入 `/workspace/runtime`。本地启动容器时，只有把宿主目录
+RoboTwin 评测器把逐 episode 结果写入 `/RoboTwin/eval_result`。镜像将该目录
+链接到 `/workspace/runtime/eval_result`；训练 checkpoint 和日志也写入
+`/workspace/runtime`。本地启动容器时，只有把宿主目录
 挂载到 `/workspace/runtime`，这些输出才会持久化；该目录未挂载时，输出保存在
-容器可写层，删除容器后会丢失。镜像内置输入数据是只随镜像分发的公共数据，
-不需要持久卷保存。
+容器可写层，删除容器后会丢失。输入数据通过 `/models` 挂载，需保留宿主机的
+`/models/robotwin-persistent`。
 
 ## 5. 官方模型推理
 
@@ -316,7 +319,7 @@ checkpoint 和日志也写入 `/workspace/runtime`。本地启动容器时，只
 cd /RoboTwin
 mkdir -p /workspace/runtime/outputs/{logs,benchmarks}
 
-bash experiments/lingbot_vla_v2_6b_robotwin/scripts/launch_official_server.sh \
+bash experiments/lingbot_vla_v2_6b_robotwin/scripts/serving/launch_official_server.sh \
   0 13400 /workspace/runtime/outputs/logs/official_server.log False
 ```
 
@@ -329,14 +332,16 @@ until curl -fsS http://127.0.0.1:13400/healthz; do sleep 2; done
 source /opt/robotwin-env/bin/activate
 export PYTHONPATH=/RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/source/lingbot-vla-v2:/RoboTwin
 
-python experiments/lingbot_vla_v2_6b_robotwin/scripts/benchmark_official_inference.py \
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/serving/benchmark_official_inference.py \
   --port 13400 \
   --repeats 3 \
   --batch-sizes 1 2 4 \
   --output /workspace/runtime/outputs/benchmarks/official_inference.json
 ```
 
-正常响应的 action 形状为 `[25, 14]`。第一次请求包含模型 warm-up，性能比较应使用后续请求。
+action 长度由模型服务的 `USE_LENGTH` 决定；当前默认值为 50，单样本响应通常为
+`[50, 14]`，实际形状以结果中的 `action_shape` 为准。第一次请求包含模型 warm-up，
+性能比较应使用后续请求。
 
 ## 6. RoboTwin 闭环评测
 
@@ -347,21 +352,15 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/benchmark_official_inferen
 
 下面先保留 baseline 评测命令，再给出 RoboTwin checkpoint 的对应命令。比赛或复现训练必须从 baseline checkpoint 开始，不能从已经训练好的 RoboTwin checkpoint 开始。
 
-以下命令默认关闭视频以减少 RGB 传输、ffmpeg 编码和磁盘写入开销。单个 episode 评测使用
-`--additional_info eval_video_log=false`；需要保存视频时，建议将其改为
-`--additional_info eval_video_log=true`，而不是依赖删除参数后的任务默认值。长 benchmark
-使用 `--no-video`；需要保存视频时应改为 `--video`，仅删除 `--no-video` 仍会使用脚本默认的
-不录视频设置。第 7 节 LoRA checkpoint 和第 8 节 Full-SFT checkpoint 的评测遵循相同规则。
+以下命令默认不录视频，以减少视频帧处理、ffmpeg 编码和磁盘写入开销。
 
-保持模型 server 运行，在模型环境中执行：
+**单任务评测（`scripts/eval_policy_xpolicylab.py`）**：一个任务可以运行多个 episode。
+示例中的 `--additional_info eval_video_log=false` 关闭视频；需要保存视频时改为
+`--additional_info eval_video_log=true`。
 
-```bash
-cd /RoboTwin
-source /opt/robotwin-env/bin/activate
-export ROBOTWIN_DISABLE_CUROBO=1
-export ROBOTWIN_EE_PLANNER=mplib
-export PYOPENGL_PLATFORM=egl
-```
+**多任务 benchmark（`experiments/lingbot_vla_v2_6b_robotwin/scripts/eval/run_robotwin_benchmark.py`）**：
+示例中的 `--no-video` 关闭视频；需要保存视频时改为 `--video`。仅删除 `--no-video`
+仍会使用脚本默认的不录视频设置。第 7 节 LoRA 和第 8 节 Full-SFT 的评测也遵循这些规则。
 
 模型 server 保持运行，在另一个终端执行 `adjust_bottle` 的 10 个 episode：
 
@@ -376,11 +375,9 @@ python scripts/eval_policy_xpolicylab.py \
   --protocol lingbot_vla_v2 \
   --host 127.0.0.1 \
   --port 13400 \
-  --device_id 0 \
   --seed 0 \
   --test_num 10 \
   --expert_check true \
-  --accept_expert_info_on_failure true \
   --eval_batch false \
   --additional_info eval_video_log=false
 ```
@@ -389,20 +386,24 @@ python scripts/eval_policy_xpolicylab.py \
 
 ```bash
 cd /RoboTwin
-source /opt/robotwin-env/bin/activate
 
-export ROBOTWIN_CHECKPOINT=/models/robotwin-persistent/models/robbyant_lingbot-vla-v2-6b-robotwin
-export LINGBOTVLA_TRAINING_CONFIG="$ROBOTWIN_CHECKPOINT/lingbotvla_cli.yaml"
-export ROBOTWIN_DISABLE_CUROBO=1
-export ROBOTWIN_EE_PLANNER=mplib
-export PYOPENGL_PLATFORM=egl
+ROBOTWIN_CHECKPOINT_ROOT=/RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/models/robbyant_lingbot-vla-v2-6b-robotwin
+ROBOTWIN_CHECKPOINT="$ROBOTWIN_CHECKPOINT_ROOT/checkpoints/global_step_50000/hf_ckpt"
+export LINGBOTVLA_TRAINING_CONFIG="$ROBOTWIN_CHECKPOINT_ROOT/lingbotvla_cli.yaml"
 
-bash experiments/lingbot_vla_v2_6b_robotwin/scripts/launch_official_server.sh \
+bash experiments/lingbot_vla_v2_6b_robotwin/scripts/serving/launch_official_server.sh \
   0 13400 /workspace/runtime/outputs/logs/robotwin_checkpoint_server.log False \
   "$ROBOTWIN_CHECKPOINT"
 ```
 
-然后使用与 baseline 相同的单次闭环评测参数：
+`ROBOTWIN_CHECKPOINT_ROOT` 保存训练配置，实际模型权重在其
+`checkpoints/global_step_50000/hf_ckpt/` 下。镜像中的 `models/`
+是指向 `/models/robotwin-persistent/models/` 的软链接。启动脚本会优先读取导出的
+`LINGBOTVLA_TRAINING_CONFIG`。此处若省略，启动脚本会改用本复现仓库的
+`/RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/training/lingbotvla_cli.yaml`，
+而不是 RoboTwin checkpoint 自带的 YAML；两份配置的模型和数据设置不同。
+
+然后使用与 baseline 相同的单任务闭环评测参数：
 
 ```bash
 cd /RoboTwin
@@ -415,18 +416,20 @@ python scripts/eval_policy_xpolicylab.py \
   --protocol lingbot_vla_v2 \
   --host 127.0.0.1 \
   --port 13400 \
-  --device_id 0 \
   --seed 0 \
   --test_num 10 \
   --expert_check true \
-  --accept_expert_info_on_failure true \
   --eval_batch false \
   --additional_info eval_video_log=false
 ```
 
-也可以通过统一入口运行同一组参数：
+也可以通过 RoboTwin 的统一入口运行同一组参数；此处最终仍调用
+`scripts/eval_policy_xpolicylab.py`：
 
 ```bash
+cd /RoboTwin
+source /opt/robotwin-env/bin/activate
+
 bash scripts/eval_policy.sh \
   --task_name adjust_bottle \
   --task_config demo_clean \
@@ -434,11 +437,9 @@ bash scripts/eval_policy.sh \
   --protocol lingbot_vla_v2 \
   --host 127.0.0.1 \
   --port 13400 \
-  --device_id 0 \
   --seed 0 \
   --test_num 10 \
   --expert_check true \
-  --accept_expert_info_on_failure true \
   --eval_batch false \
   --additional_info eval_video_log=false
 ```
@@ -449,11 +450,14 @@ bash scripts/eval_policy.sh \
 `/workspace/runtime`，结果会持久化到对应的宿主目录；未挂载时仅保存在
 容器内。
 
-测试 `env_cfg/eval/all_tasks.yml` 中列出的 clean 和 randomized 两组任务时，使用统一脚本启动
+测试 RoboTwin 仓库 `/RoboTwin/env_cfg/eval/all_tasks.yml` 列出的 50 个任务时，
+脚本分别使用 `demo_clean` 和 `demo_randomized` 两种任务配置。统一脚本会启动
 四个或八个模型服务和对应数量的评测 worker。每张 GPU 同时运行一个模型服务和一个仿真进程；
 任务由动态队列分配，先完成的 GPU 会继续领取下一个任务，减少长短任务不均造成的
 尾部等待。四卡运行前确认 `13400`～`13403` 没有被其他模型服务占用，八卡运行前确认
-`13400`～`13407` 没有被其他模型服务占用。
+`13400`～`13407` 没有被其他模型服务占用。脚本默认通过 HIP 运行时自动取得
+每张卡的 PCI 地址，并据此设置 `DRI_PRIME`；如需手工覆盖，可按 HIP GPU 顺序
+设置 `ROBOTWIN_DRI_PRIME_MAP` 或使用 `--dri-prime-map`。
 
 四卡运行：
 
@@ -461,11 +465,10 @@ bash scripts/eval_policy.sh \
 cd /RoboTwin
 source /opt/robotwin-env/bin/activate
 
-python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/eval/run_robotwin_benchmark.py \
   --gpu-count 4 \
   --episodes 10 \
   --expert-check \
-  --accept-expert-info-on-failure \
   --no-video \
   --run-name both100x10_4gpu \
   --runtime-dir /workspace/runtime \
@@ -486,11 +489,10 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
 八卡运行时只需修改 GPU 数量和运行目录名：
 
 ```bash
-python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/eval/run_robotwin_benchmark.py \
   --gpu-count 8 \
   --episodes 10 \
   --expert-check \
-  --accept-expert-info-on-failure \
   --no-video \
   --run-name both100x10_8gpu \
   --runtime-dir /workspace/runtime \
@@ -498,8 +500,9 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
 ```
 
 如果要使用官方 RoboTwin checkpoint 运行同样的四卡/八卡长 benchmark，保持
-`LINGBOTVLA_TRAINING_CONFIG` 指向 checkpoint 自带的训练配置，并通过
-`--model-path` 传入 checkpoint。先确认没有其他 server 占用对应端口。
+`LINGBOTVLA_TRAINING_CONFIG` 指向 checkpoint 仓库根目录的配置，并通过
+`--model-path` 传入实际权重目录 `checkpoints/global_step_50000/hf_ckpt`。启动脚本会读取
+该环境变量；如果省略，会回退到前述本复现仓库的训练配置。先确认没有其他 server 占用对应端口。
 
 四卡 RoboTwin checkpoint benchmark：
 
@@ -507,18 +510,15 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
 cd /RoboTwin
 source /opt/robotwin-env/bin/activate
 
-export ROBOTWIN_CHECKPOINT=/models/robotwin-persistent/models/robbyant_lingbot-vla-v2-6b-robotwin
-export LINGBOTVLA_TRAINING_CONFIG="$ROBOTWIN_CHECKPOINT/lingbotvla_cli.yaml"
-export ROBOTWIN_DISABLE_CUROBO=1
-export ROBOTWIN_EE_PLANNER=mplib
-export PYOPENGL_PLATFORM=egl
+ROBOTWIN_CHECKPOINT_ROOT=/RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/models/robbyant_lingbot-vla-v2-6b-robotwin
+ROBOTWIN_CHECKPOINT="$ROBOTWIN_CHECKPOINT_ROOT/checkpoints/global_step_50000/hf_ckpt"
+export LINGBOTVLA_TRAINING_CONFIG="$ROBOTWIN_CHECKPOINT_ROOT/lingbotvla_cli.yaml"
 
-python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/eval/run_robotwin_benchmark.py \
   --gpu-count 4 \
   --episodes 10 \
   --model-path "$ROBOTWIN_CHECKPOINT" \
   --expert-check \
-  --accept-expert-info-on-failure \
   --no-video \
   --run-name robotwin_checkpoint_both100x10_4gpu \
   --runtime-dir /workspace/runtime \
@@ -528,12 +528,11 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
 八卡时改为：
 
 ```bash
-python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/eval/run_robotwin_benchmark.py \
   --gpu-count 8 \
   --episodes 10 \
   --model-path "$ROBOTWIN_CHECKPOINT" \
   --expert-check \
-  --accept-expert-info-on-failure \
   --no-video \
   --run-name robotwin_checkpoint_both100x10_8gpu \
   --runtime-dir /workspace/runtime \
@@ -646,7 +645,7 @@ source /opt/robotwin-env/bin/activate
 
 MERGED=/workspace/runtime/outputs/lora_100steps_8gpu/merged_checkpoint/global_step_100/hf_ckpt
 
-python experiments/lingbot_vla_v2_6b_robotwin/scripts/merge_lora_dcp.py \
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/checkpoints/merge_lora_dcp.py \
   --checkpoint /workspace/runtime/outputs/lora_100steps_8gpu/checkpoints/global_step_100 \
   --training-output /workspace/runtime/outputs/lora_100steps_8gpu \
   --base-model /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/models/robbyant_lingbot-vla-v2-6b \
@@ -654,7 +653,7 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/merge_lora_dcp.py \
   --rank 8 \
   --alpha 16
 
-bash experiments/lingbot_vla_v2_6b_robotwin/scripts/launch_official_server.sh \
+bash experiments/lingbot_vla_v2_6b_robotwin/scripts/serving/launch_official_server.sh \
   0 13400 /workspace/runtime/outputs/logs/merged_server.log False "$MERGED"
 ```
 
@@ -678,11 +677,9 @@ bash scripts/eval_policy.sh \
   --protocol lingbot_vla_v2 \
   --host 127.0.0.1 \
   --port 13400 \
-  --device_id 0 \
   --seed 0 \
   --test_num 10 \
   --expert_check true \
-  --accept_expert_info_on_failure true \
   --eval_batch false \
   --additional_info eval_video_log=false
 ```
@@ -692,11 +689,10 @@ bash scripts/eval_policy.sh \
 一组 4/8 卡模型服务。Notebook 默认使用八卡；命令行仍分别给出四卡和八卡示例。四卡运行：
 
 ```bash
-python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/eval/run_robotwin_benchmark.py \
   --gpu-count 4 \
   --episodes 10 \
   --expert-check \
-  --accept-expert-info-on-failure \
   --no-video \
   --model-path "$MERGED" \
   --run-name lora_100steps_both100x10_4gpu \
@@ -707,11 +703,10 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
 八卡运行：
 
 ```bash
-python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/eval/run_robotwin_benchmark.py \
   --gpu-count 8 \
   --episodes 10 \
   --expert-check \
-  --accept-expert-info-on-failure \
   --no-video \
   --model-path "$MERGED" \
   --run-name lora_100steps_both100x10_8gpu \
@@ -755,7 +750,7 @@ GLOBAL_BATCH_SIZE=256 \
 TIMEOUT_SECONDS=0 \
 MAX_STEPS=10 SAVE_STEPS=10 \
 OUTPUT_DIR=/workspace/runtime/outputs/full_sft_full_4gpu_10steps \
-bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
+bash experiments/lingbot_vla_v2_6b_robotwin/scripts/training/train_full_sft.sh
 ```
 
 八卡运行：
@@ -771,7 +766,7 @@ GLOBAL_BATCH_SIZE=256 \
 TIMEOUT_SECONDS=0 \
 MAX_STEPS=10 SAVE_STEPS=10 \
 OUTPUT_DIR=/workspace/runtime/outputs/full_sft_full_8gpu_10steps \
-bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
+bash experiments/lingbot_vla_v2_6b_robotwin/scripts/training/train_full_sft.sh
 ```
 
 `TIMEOUT_SECONDS` 只控制 smoke test 的最长运行时间；正式训练时将其设为 `0`，并根据需要
@@ -845,7 +840,7 @@ GLOBAL_BATCH_SIZE=256 \
 TIMEOUT_SECONDS=0 \
 MAX_STEPS=10 SAVE_STEPS=10 \
 OUTPUT_DIR=/workspace/runtime/outputs/full_sft_none_4gpu_10steps \
-bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
+bash experiments/lingbot_vla_v2_6b_robotwin/scripts/training/train_full_sft.sh
 ```
 
 八卡运行：
@@ -860,7 +855,7 @@ GLOBAL_BATCH_SIZE=256 \
 TIMEOUT_SECONDS=0 \
 MAX_STEPS=10 SAVE_STEPS=10 \
 OUTPUT_DIR=/workspace/runtime/outputs/full_sft_none_8gpu_10steps \
-bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
+bash experiments/lingbot_vla_v2_6b_robotwin/scripts/training/train_full_sft.sh
 ```
 
 ### 8.3 `enable_full_shard` 的选择
@@ -895,7 +890,7 @@ TEACHER_MODE=full \
 MAX_STEPS=1 \
 SAVE_STEPS=1 \
 OUTPUT_DIR=/workspace/runtime/outputs/full_sft_4gpu_no_reshard_1step \
-bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
+bash experiments/lingbot_vla_v2_6b_robotwin/scripts/training/train_full_sft.sh
 ```
 
 八卡运行：
@@ -907,7 +902,7 @@ ENABLE_FULL_SHARD=false \
 MAX_STEPS=1 \
 SAVE_STEPS=1 \
 OUTPUT_DIR=/workspace/runtime/outputs/full_sft_8gpu_no_reshard_1step \
-bash experiments/lingbot_vla_v2_6b_robotwin/training/train_full_sft.sh
+bash experiments/lingbot_vla_v2_6b_robotwin/scripts/training/train_full_sft.sh
 ```
 
 ### 8.4 将全量 DCP 转换为推理 checkpoint 并重新推理
@@ -923,7 +918,7 @@ TRAIN_OUTPUT=/workspace/runtime/outputs/full_sft_full_8gpu_10steps
 CHECKPOINT="$TRAIN_OUTPUT/checkpoints/global_step_10"
 FULL_SFT_MODEL="$TRAIN_OUTPUT/merged_checkpoint/global_step_10/hf_ckpt"
 
-python experiments/lingbot_vla_v2_6b_robotwin/scripts/convert_full_sft_dcp.py \
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/checkpoints/convert_full_sft_dcp.py \
   --checkpoint "$CHECKPOINT" \
   --training-output "$TRAIN_OUTPUT" \
   --output "$FULL_SFT_MODEL"
@@ -932,7 +927,7 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/convert_full_sft_dcp.py \
 启动全量 SFT 模型，继续复用 13400 接口：
 
 ```bash
-bash experiments/lingbot_vla_v2_6b_robotwin/scripts/launch_official_server.sh \
+bash experiments/lingbot_vla_v2_6b_robotwin/scripts/serving/launch_official_server.sh \
   0 13400 /workspace/runtime/outputs/logs/full_sft_server.log False "$FULL_SFT_MODEL"
 ```
 
@@ -951,11 +946,9 @@ bash scripts/eval_policy.sh \
   --protocol lingbot_vla_v2 \
   --host 127.0.0.1 \
   --port 13400 \
-  --device_id 0 \
   --seed 0 \
   --test_num 10 \
   --expert_check true \
-  --accept_expert_info_on_failure true \
   --eval_batch false \
   --additional_info eval_video_log=false
 ```
@@ -964,11 +957,10 @@ bash scripts/eval_policy.sh \
 评测；开始前先停止上面占用 13400 端口的全量 SFT 服务。四卡运行：
 
 ```bash
-python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/eval/run_robotwin_benchmark.py \
   --gpu-count 4 \
   --episodes 10 \
   --expert-check \
-  --accept-expert-info-on-failure \
   --no-video \
   --model-path "$FULL_SFT_MODEL" \
   --run-name full_sft_100steps_both100x10_4gpu \
@@ -979,11 +971,10 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
 八卡运行：
 
 ```bash
-python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
+python experiments/lingbot_vla_v2_6b_robotwin/scripts/eval/run_robotwin_benchmark.py \
   --gpu-count 8 \
   --episodes 10 \
   --expert-check \
-  --accept-expert-info-on-failure \
   --no-video \
   --model-path "$FULL_SFT_MODEL" \
   --run-name full_sft_100steps_both100x10_8gpu \
@@ -996,7 +987,7 @@ python experiments/lingbot_vla_v2_6b_robotwin/scripts/run_clean_benchmark.py \
 
 # 第二部分：从干净基础镜像或本机安装
 
-本部分用于不使用完整镜像的环境。若已经使用第一部分的镜像，不要重复执行。
+本部分用于不使用本项目镜像的环境。若已经使用第一部分的镜像，不要重复执行。
 
 ## 9. 基础环境
 
@@ -1042,9 +1033,9 @@ PY
 ## 10. 下载固定源码并应用补丁
 
 ```bash
-git clone --recurse-submodules https://github.com/RoboTwin-Platform/RoboTwin.git /RoboTwin
+git clone --no-checkout https://github.com/RoboTwin-Platform/RoboTwin.git /RoboTwin
 cd /RoboTwin
-git checkout 266f3aadf505a4f7fe9af0faa41a20f5f47cd123
+git checkout e154702de28cac4b9bfe0299044303f507236bb3
 git submodule update --init --recursive
 test "$(git -C XPolicyLab rev-parse HEAD)" = c37109c500be67d0dea6b36bf7337bbd26e763cd
 
@@ -1055,24 +1046,28 @@ git -C experiments/lingbot_vla_v2_6b_robotwin/source/lingbot-vla-v2 \
   checkout 951475ae1b1d87553e7dc47c97b53a3d695c0d13
 ```
 
-从本复现仓库应用三个兼容补丁：一个 RoboTwin 合并补丁、一个 XPolicyLab 补丁和一个
-LingBot-VLA-v2 补丁：
+从本复现仓库应用三个兼容补丁：RoboTwin ROCm 与 LingBot 评测补丁、
+XPolicyLab 数据补丁，以及 LingBot-VLA-v2 补丁：
 
 ```bash
-git apply /path/to/RoboTwin-radeon-cloud/docker/patches/robotwin-rocm-reproduction.patch
+git apply /path/to/RoboTwin-radeon-cloud/patches/robotwin-rocm-reproduction.patch
 git -C XPolicyLab apply \
-  /path/to/RoboTwin-radeon-cloud/docker/patches/xpolicylab-lerobot-v30.patch
+  /path/to/RoboTwin-radeon-cloud/patches/xpolicylab-lerobot-v30.patch
 git -C experiments/lingbot_vla_v2_6b_robotwin/source/lingbot-vla-v2 apply \
-  /path/to/RoboTwin-radeon-cloud/docker/patches/lingbot-vla-v2-rocm.patch
+  /path/to/RoboTwin-radeon-cloud/patches/lingbot-vla-v2-rocm.patch
 
-cp -a /path/to/RoboTwin-radeon-cloud/docker/assets/experiments/lingbot_vla_v2_6b_robotwin/. \
-  experiments/lingbot_vla_v2_6b_robotwin/
+REPRO_ROOT=/path/to/RoboTwin-radeon-cloud
+EXP_ROOT=experiments/lingbot_vla_v2_6b_robotwin
+mkdir -p "$EXP_ROOT/scripts" "$EXP_ROOT/training"
+cp -a "$REPRO_ROOT/scripts/." "$EXP_ROOT/scripts/"
+cp "$REPRO_ROOT/configs/lingbot_vla_v2_6b_robotwin/lingbotvla_cli.yaml" "$EXP_ROOT/training/"
 ```
 
-这些补丁完成：
+各补丁的修改文件、作用及适用版本见 [patches/README.md](./patches/README.md)。主要用途：
 
-- `robotwin-rocm-reproduction.patch`：合并 ROCm 环境兼容、CuRobo fallback、MPLib expert
-  批量规划、`expert_check=true` 的 expert/render 信息保留，以及 instruction fallback；
+- `robotwin-rocm-reproduction.patch`：RoboTwin 的 ROCm 环境兼容、CuRobo fallback、
+  MPLib 规划及 LingBot websocket 评测协议；基于上游已修复 seed 计数的 `e154702...`，
+  保留其不稳定 seed 的筛选顺序；
 - `xpolicylab-lerobot-v30.patch`：兼容 LeRobot 0.6 的数据转换和 EE 数据格式；
 - `lingbot-vla-v2-rocm.patch`：兼容 ROCm/LeRobot 训练、推理和 action-expert LoRA。
 
@@ -1098,21 +1093,24 @@ printf '%s\n' \
   /opt/venv/lib/python3.12/dist-packages \
   > "$MODEL_SITE/rocm_image_venv.pth"
 
-python -m pip install --upgrade 'pip<26' 'setuptools<81' wheel
-python -m pip install --prefer-binary \
+awk '/^(pip|setuptools|wheel)==/{print}' \
+  "$REPRO_ROOT/docker/requirements.txt" > /tmp/robotwin-build-tools.txt
+python -m pip install --no-deps -r /tmp/robotwin-build-tools.txt
+python -m pip install --no-deps --no-build-isolation --prefer-binary \
   -r "$REPRO_ROOT/docker/requirements.txt"
-python -m pip install --no-deps \
-  -r "$REPRO_ROOT/docker/requirements-no-deps.txt"
-python -m pip install --prefer-binary open3d==0.19.0
 
-python -m pip install -e /RoboTwin/XPolicyLab
-python -m pip install --no-deps -e \
-  /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/source/lingbot-vla-v2
+python -m pip install --no-deps --no-build-isolation \
+  -e /RoboTwin/XPolicyLab \
+  -e /RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/source/lingbot-vla-v2
 ```
 
 不要安装上游完整 requirements 文件，其中固定的 CUDA/PyPI torch、triton 或
-flash-attn 会覆盖 ROCm torch。`requirements-no-deps.txt` 必须保留 `--no-deps`，
-否则 LeRobot 的依赖解析会替换主清单中已经验证的版本。
+flash-attn 会覆盖 ROCm torch。统一清单中的普通包按名称排序，并以 `--no-deps`
+装入同一个模型和 Jupyter 环境；XPolicyLab、LingBot 从固定源码直接 editable 安装。
+LeRobot 0.6
+声明要求 NumPy ≥2 和 huggingface-hub ≥1，与当前 LingBot/Transformers 组合冲突。
+固定的 NumPy 1.26 与 hub 0.34 已实际读取本项目的 LeRobot v3 数据；包元数据
+仍不满足 LeRobot 的声明约束，不能把 `pip check` 当作此组合的通过条件。
 
 ### 11.1 安装 ROCm FlashAttention2
 
@@ -1129,19 +1127,20 @@ AITER_USE_SYSTEM_TRITON=1 \
   /opt/robotwin-env/bin/python setup.py develop
 ```
 
-然后安装固定的 AMD FlashAttention2 fork。`AITER_TRITON_ONLY=1` 让安装期只使用
+然后安装已合入 PR #2900 的 Dao-AILab FlashAttention2 主仓库固定提交。
+`AITER_TRITON_ONLY=1` 让安装期只使用
 AITER 的 Triton 实现，避免在无 GPU 的镜像构建环境中加载 AITER AOT/C++ 算子并查询
 GPU driver；因此不需要再修改 FlashAttention 的 `setup.py`。`--no-deps` 和
 `FLASH_ATTENTION_USE_SYSTEM_AITER=TRUE` 用于防止 pip 安装第二份 AITER、Triton 或
 PyTorch：
 
 ```bash
-git clone https://github.com/ZiguanWang/flash-attention.git \
+git clone https://github.com/Dao-AILab/flash-attention.git \
   /opt/flash-attention-source
 git -C /opt/flash-attention-source checkout \
-  bc76302fbb24c0158207978930db030ca1eca5ca
+  9c6d9297e5d43653c2ea5837ed9e0d10f76ed231
 test "$(git -C /opt/flash-attention-source rev-parse HEAD)" = \
-  bc76302fbb24c0158207978930db030ca1eca5ca
+  9c6d9297e5d43653c2ea5837ed9e0d10f76ed231
 
 cd /opt/flash-attention-source
 PYTHONPATH=/opt/aiter \
@@ -1195,7 +1194,8 @@ test -f assets/objects/objaverse/list.json
 
 ## 12. 创建数据转换环境
 
-数据转换环境同样使用与镜像一致的 `/opt/lerobot-env`：
+仅在从干净基础镜像或裸机手工转换数据时，才需要创建独立的 `/opt/lerobot-env`。
+本项目默认镜像使用宿主机预先转换的数据，不包含这个环境：
 
 ```bash
 /opt/venv/bin/python -m venv --system-site-packages /opt/lerobot-env
@@ -1277,13 +1277,11 @@ export HF_LEROBOT_HOME=/RoboTwin/data/lerobot
 export ROBOTWIN_DISABLE_CUROBO=1
 export ROBOTWIN_EE_PLANNER=mplib
 export PYOPENGL_PLATFORM=egl
-export AITER_TRITON_ONLY=1
-export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
-export PYTHONPATH=/opt/aiter${PYTHONPATH:+:${PYTHONPATH}}
+source /usr/local/bin/robotwin-env
 ```
 
-从干净基础镜像或本机安装时，每个用于推理或训练的新 shell 都要设置上面最后三个变量；
-也可以将它们写入所使用 shell 的启动文件。不要在运行期继续设置仅用于安装的
+从干净基础镜像或本机安装时，每个用于推理或训练的新 shell 都要执行上面的 `source`；
+也可以把 `docker/robotwin-env.sh` 复制到本机后 source。不要在运行期继续设置仅用于安装的
 `AITER_USE_SYSTEM_TRITON` 和 `FLASH_ATTENTION_USE_SYSTEM_AITER`。
 
 下载、解压并删除全部原始 ZIP：
@@ -1303,10 +1301,25 @@ test -z "$(find data -type f -name '*.zip' -print -quit)"
 使用数据环境并行转换全部任务。构建镜像时直接调用仓库提供的批处理脚本：
 
 ```bash
+source /usr/local/bin/robotwin-env
 LEROBOT_PYTHON=/opt/lerobot-env/bin/python \
 CONVERSION_JOBS=8 \
-bash /path/to/RoboTwin-radeon-cloud/docker/full/convert_all_data.sh
+bash /path/to/RoboTwin-radeon-cloud/scripts/data/convert_all_data.sh
 ```
+
+转换脚本默认将临时目录、日志和缓存放在 `/workspace/runtime`，不再使用通常只有几 GB
+的 `/tmp`。可以通过
+`ROBOTWIN_RUNTIME_ROOT`、`CONVERSION_CACHE_ROOT` 和 `CONVERSION_LOG_ROOT` 覆盖这些路径；
+例如需要把缓存放到单独持久盘时：
+
+```bash
+CONVERSION_CACHE_ROOT=/root/conv-cache \
+CONVERSION_LOG_ROOT=/workspace/runtime/outputs/logs/robotwin-lerobot-conversion \
+  bash /path/to/RoboTwin-radeon-cloud/scripts/data/convert_all_data.sh
+```
+
+Dockerfile 构建阶段仍会显式把 `CONVERSION_CACHE_ROOT` 指向 BuildKit cache mount，避免把
+构建缓存写入最终镜像层。
 
 创建运行目录后，直接按第一部分第 5～8 节执行；虚拟环境和运行输出路径与镜像
 保持一致，不再需要替换命令中的路径：
@@ -1328,7 +1341,8 @@ source /opt/lerobot-env/bin/activate
 python -m pip install h5py==3.14.0
 ```
 
-重新构建的完整镜像已经包含该依赖。
+默认镜像的 `/opt/robotwin-env` 已包含 `h5py`；这里的安装命令仅适用于手工创建的
+`/opt/lerobot-env`。
 
 ### 找不到 `assets/norm_stats/robotwin.json`
 
@@ -1402,7 +1416,7 @@ python -m torch.distributed.run --standalone --nproc-per-node=4 ...
 
 ### checkpoint 没有持久化
 
-需要在删除容器后保留 checkpoint 时，完整镜像和 external-data 镜像都应把宿主
+需要在删除容器后保留 checkpoint 时，应把宿主
 目录挂到 `/workspace/runtime`，训练配置的 `output_dir` 必须位于
-`/workspace/runtime/outputs`。external-data 镜像不会再把 `/workspace/runtime`
+`/workspace/runtime/outputs`。默认镜像不会把 `/workspace/runtime`
 链接到外置数据目录。
