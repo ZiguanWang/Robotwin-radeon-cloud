@@ -38,7 +38,7 @@ Notebook 中的长时间训练和全量 benchmark 默认不会自动执行，需
 ### 单任务 workshop
 
 - [LoRA workshop](./notebooks/lora_workshop.ipynb)：自动选择一张空闲 AMD ROCm GPU（如 R9700 或 W7900），用 `click_alarmclock` 的 50 条 clean 示范训练 25 步；clean 和 randomized 各展示 10 个固定 seed 的训练前后结果。
-- [全参数 SFT workshop](./notebooks/sft_workshop.ipynb)：自动选择四张空闲 AMD ROCm GPU，用 `turn_switch` 的 50 条 clean 示范训练 100 步，micro8 × 4 卡 × 累积1 = global32；四张 GPU 并行完成 clean 和 randomized 各 10 个固定 seed 的评测。训练使用 FSDP2 full-shard，不启用 CPU offload，需至少 100 GiB 可用输出空间。
+- [Action-expert SFT workshop](./notebooks/sft_workshop.ipynb)：四卡训练 `turn_switch` 的 action expert，在相同的固定 seed 上对比基础模型、训练后模型和官方 RoboTwin checkpoint；最后录制官方 checkpoint 的成功视频。
 
 ## 推荐使用顺序
 
