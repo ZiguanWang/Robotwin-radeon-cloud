@@ -1,50 +1,49 @@
-# RoboTwin ROCm 复现资料
+# RoboTwin ROCm Reproduction Resources
 
-本仓库用于在 AMD ROCm 环境下复现 LingBot-VLA-v2 与 RoboTwin 的推理、闭环评测、LoRA 训练和全参数 SFT 流程。默认面向 Radeon Cloud 上的 4× 或 8× W7900 实例。
+[Chinese (Simplified)](./README.zh-CN.md)
 
-仓库根目录的 `scripts/` 按服务、评测、训练、checkpoint 转换和数据准备用途组织；
-训练 YAML 位于 `configs/`。可在宿主机运行
-`bash scripts/data/prepare_external_data.sh`，准备默认镜像要挂载的资产、
-数据和基础模型。
+This repository reproduces LingBot-VLA-v2 inference, closed-loop RoboTwin evaluation, LoRA training, and full-parameter SFT on AMD ROCm. The default target is a Radeon Cloud instance with four or eight W7900 GPUs.
 
-## 文档和 Notebook
+The top-level `scripts/` directory groups serving, evaluation, training, checkpoint conversion, and data preparation helpers. Training YAML files live in `configs/`. Run `bash scripts/data/prepare_external_data.sh` on the host to prepare the assets, data, and base models mounted by the default image.
+
+## Documentation and notebooks
 
 ### [Reproduce_Guide.md](./Reproduce_Guide.md)
 
-复现指南是完整的命令行参考，包含：
+The reproduction guide is the complete command-line reference. It covers:
 
-- Radeon Cloud、Docker 和环境检查；
-- 官方 LingBot-VLA-v2 基础 checkpoint 的启动与推理；
-- MPLib、`expert_check=true` 以及 clean/randomized 全量评测；
-- 四卡/八卡 LoRA 训练、checkpoint 合并和评测；
-- 四卡/八卡完整 depth/video teacher 全参数 SFT；
-- DCP checkpoint 转换、模型重新启动和评测；
-- [源码补丁](./patches/README.md) 的作用及手动应用方式。
+- Radeon Cloud, Docker, and environment checks;
+- serving and testing the official LingBot-VLA-v2 base checkpoint;
+- MPLib, `expert_check=true`, and full clean/randomized evaluation;
+- four- and eight-GPU LoRA training, checkpoint merging, and evaluation;
+- four- and eight-GPU full-parameter SFT with depth/video teachers;
+- DCP checkpoint conversion, model restart, and evaluation;
+- the purpose and manual application of [source patches](./patches/README.md).
 
-需要复制命令到终端执行，或了解完整环境、参数和排错流程时，以这份文档为准。
+Use the guide when you need copyable terminal commands or details about the environment, parameters, and troubleshooting. A [Chinese version](./Reproduce_Guide.zh-CN.md) is also available.
 
 ### [RoboTwin_ROCm_Reproduction.ipynb](./notebooks/RoboTwin_ROCm_Reproduction.ipynb)
 
-Notebook 是交互式复现入口，与指南中的配置保持同步，按顺序覆盖：
+The notebook is the interactive reproduction entry point. Its settings match the guide, and its cells cover:
 
-1. 环境和 GPU 检查；
-2. 官方基础模型服务与 `adjust_bottle` 10-episode 评测；
-3. clean + randomized 的 4/8 卡、100 tasks × 10 episodes benchmark；
-4. 4/8 卡 LoRA 训练、合并和评测；
-5. 4/8 卡完整 teacher 全参数 SFT、DCP 转换和评测。
+1. Environment and GPU checks;
+2. The official base-model server and a 10-episode `adjust_bottle` evaluation;
+3. A clean and randomized benchmark across 100 tasks × 10 episodes on four or eight GPUs;
+4. LoRA training, merging, and evaluation on four or eight GPUs;
+5. Full-parameter SFT with complete teachers, DCP conversion, and evaluation on four or eight GPUs.
 
-Notebook 中的长时间训练和全量 benchmark 默认不会自动执行，需要在对应代码单元中手动打开开关，并确认当前实例 GPU 数量、模型数据和持久化目录。Notebook 适合交互式运行、观察日志和复用中间变量；需要一次性、可审计的命令行流程时，请使用复现指南。
+Long training runs and full benchmarks do not execute automatically. Enable their cells deliberately after checking the GPU count, model data, and persistent output path. Use the notebook for interactive runs and inspecting logs; use the guide for a command-line workflow that is easier to audit.
 
-### 单任务 workshop
+### Single-task workshops
 
-- [LoRA workshop](./notebooks/lora_workshop.ipynb)：自动选择一张空闲 AMD ROCm GPU（如 R9700 或 W7900），用 `click_alarmclock` 的 50 条 clean 示范训练 25 步；clean 和 randomized 各展示 10 个固定 seed 的训练前后结果。
-- [Action-expert SFT workshop](./notebooks/sft_workshop.ipynb)：四卡训练 `turn_switch` 的 action expert，在相同的固定 seed 上对比基础模型、训练后模型和官方 RoboTwin checkpoint；最后录制官方 checkpoint 的成功视频。
+- [LoRA workshop](./notebooks/lora_workshop.ipynb): automatically selects one idle AMD ROCm GPU (such as an R9700 or W7900), trains for 25 steps on 50 clean `click_alarmclock` demonstrations, and compares results before and after training on 10 fixed seeds in each of the clean and randomized scenes.
+- [Action-expert SFT workshop](./notebooks/sft_workshop.ipynb): trains the `turn_switch` action expert on four GPUs, compares the base model, trained model, and official RoboTwin checkpoint on the same fixed seeds, then records a successful video with the official checkpoint.
 
-## 推荐使用顺序
+## Recommended order
 
-1. 先阅读 [Reproduce_Guide.md](./Reproduce_Guide.md) 的环境、镜像和模型说明。
-2. 按指南完成 Docker 或 Radeon Cloud 实例准备。
-3. 在 JupyterLab 中打开 [RoboTwin_ROCm_Reproduction.ipynb](./notebooks/RoboTwin_ROCm_Reproduction.ipynb)，按顺序执行检查、smoke test 和所需评测单元。
-4. 需要正式训练或长时间 benchmark 时，使用 Notebook 中确认过的参数，切换到指南中的命令行入口并将输出写入 `/workspace/runtime`。
+1. Read the environment, image, and model sections of [Reproduce_Guide.md](./Reproduce_Guide.md).
+2. Prepare Docker or a Radeon Cloud instance as described in the guide.
+3. Open [RoboTwin_ROCm_Reproduction.ipynb](./notebooks/RoboTwin_ROCm_Reproduction.ipynb) in JupyterLab and run the checks, smoke test, and evaluation cells you need.
+4. For formal training or long benchmarks, carry the parameters checked in the notebook into the guide's command-line entry points and write outputs under `/workspace/runtime`.
 
-默认模型是官方 `robbyant/lingbot-vla-v2-6b` 基础 checkpoint；RoboTwin 后训练 checkpoint 只在显式指定训练后模型进行验证时使用。默认评测使用 MPLib、`expert_check=true`，跳过 expert 检查失败或环境初始化不稳定的 seed。
+The default model is the official `robbyant/lingbot-vla-v2-6b` base checkpoint. Use the RoboTwin-trained checkpoint only when you select it explicitly. Default evaluation uses MPLib and `expert_check=true` and skips seeds that fail the expert check or have unstable environment initialization.

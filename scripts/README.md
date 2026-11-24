@@ -1,26 +1,20 @@
-# 可复现流程脚本
+# Reproduction workflow scripts
 
-| 目录 | 用途 |
+| Directory | Purpose |
 |---|---|
-| `serving/` | LingBot 模型服务与推理测试 |
-| `eval/` | RoboTwin 评测、固定 seed 配对评测、四卡并行评测、可选视频及空闲 GPU 自动发现 |
-| `checkpoints/` | LoRA 和全参数 SFT checkpoint 转换 |
-| `training/` | 全参数 SFT 与单任务 LoRA 启动 |
-| `data/` | LeRobot 数据转换及本机 external-data 挂载目录准备 |
+| `serving/` | LingBot model serving and inference checks |
+| `eval/` | RoboTwin evaluation, paired fixed-seed evaluation, four-GPU parallel evaluation, optional video, and idle-GPU discovery |
+| `checkpoints/` | LoRA and full-parameter SFT checkpoint conversion |
+| `training/` | Full-parameter SFT and single-task LoRA launchers |
+| `data/` | LeRobot data conversion and host-side preparation of the external-data mount |
 
-训练 YAML 位于 `configs/lingbot_vla_v2_6b_robotwin/`。Dockerfile 用一次 `COPY`
-将运行脚本放到 `/RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/scripts/`；
-根目录 `.dockerignore` 排除了仅在宿主机使用的两个 `data/` 脚本。
-LoRA/SFT Notebook 在各自的代码单元中调用容器内脚本并编排训练、转换与评测。
+Training YAML files live under `configs/lingbot_vla_v2_6b_robotwin/`. The Dockerfile copies runtime helpers into `/RoboTwin/experiments/lingbot_vla_v2_6b_robotwin/scripts/` in one `COPY` step. The root `.dockerignore` excludes the two `data/` scripts that run only on the host. The LoRA and SFT notebooks call the container's helpers and coordinate training, conversion, and evaluation in their own cells.
 
-本机准备默认镜像的挂载数据：
+Prepare the default image's mounted data on the host:
 
 ```bash
 bash scripts/data/prepare_external_data.sh --dry-run
 bash scripts/data/prepare_external_data.sh
 ```
 
-脚本直接在宿主机准备 `/models/robotwin-persistent`：下载仿真资产、50 个 clean 示范
-任务及基础模型，转换缺失的 LeRobot v3 任务，验证后生成训练清单。缺少 Python 依赖时，
-会在目标目录的 `.preparation_runtime/` 中创建隔离环境并安装；缓存和转换日志也存放在此。
-无需运行容器或 GPU 评测。
+The script prepares `/models/robotwin-persistent` directly on the host: it downloads simulation assets, 50 clean demonstration tasks, and base models; converts missing tasks to LeRobot v3; validates the result; and writes the training manifest. When Python dependencies are missing, it creates isolated environments under `.preparation_runtime/` in the target directory and keeps caches and conversion logs there. It does not require a running container or GPU evaluation.
